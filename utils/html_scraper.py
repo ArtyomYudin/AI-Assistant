@@ -10,7 +10,7 @@ from langchain_community.document_transformers import Html2TextTransformer, Beau
 root = pathlib.Path(__file__).parent.parent.resolve()
 
 FILE_TO_PARSE = f"{root}/source_data/links.txt"
-DIR_TO_STORE = f"{root}/md_files"
+DIR_TO_STORE = f"{root}/scraped_data"
 
 # Получение списка ссылок, предварительно удалив лишние пробелы
 def get_links_to_parse() -> list:

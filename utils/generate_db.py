@@ -5,14 +5,14 @@ import time
 
 from langchain_community.document_loaders import TextLoader
 from langchain.schema import Document
-from langchain_community.embeddings import OllamaEmbeddings
 from langchain_text_splitters import MarkdownHeaderTextSplitter, MarkdownTextSplitter
-from langchain.vectorstores import Chroma
+from langchain_community.vectorstores import Chroma
+from langchain_ollama import OllamaEmbeddings
 
+global_unique_hashes = set()
 root = pathlib.Path(__file__).parent.parent.resolve()
 CHROMA_DB_PATH = f"{root}/chroma_db"
-DATA_PATH = f"{root}/md_files"
-global_unique_hashes = set()
+DATA_PATH = f"{root}/scraped_data"
 
 
 # Функция принимает строковое значение, кодирует его в байты и вычисляет SHA-256 хэш.
@@ -32,7 +32,7 @@ def get_all_files_by_extension(path: str, file_extension='.md'):
 # Загрузка документов
 def load_documents(data_path: str, file_extension=".md") -> list:
     documents = []
-    files_list = get_all_files_by_extension(DATA_PATH, file_extension)
+    files_list = get_all_files_by_extension(data_path, file_extension)
     for f_name in files_list:
         document_loader = TextLoader(f_name, encoding="utf-8")
         documents.extend(document_loader.load())
@@ -41,10 +41,12 @@ def load_documents(data_path: str, file_extension=".md") -> list:
 
 
 # Разделение содержимого документов небольшие фрагменты (chunk)
+# text_splitter не задействован, используется разделение по заголовкам (header)
+
 def split_text(documents: list[Document]):
     text_splitter = MarkdownTextSplitter(
-        chunk_size=500,  # Размер каждого фрагмента в символах
-        chunk_overlap=100,  # Перекрытие между последовательными фрагментами
+        chunk_size=380,  # Размер каждого фрагмента в символах
+        chunk_overlap=80,  # Перекрытие между последовательными фрагментами
         length_function=len,  # Функция для вычисления длины текста
     )
 
@@ -61,6 +63,8 @@ def split_text(documents: list[Document]):
             chunk.metadata['source'] = doc.metadata['source']
         chunks.extend(parsed_chunks)
 
+    # Разделение документов на более мелкие части с помощью текстового разделителя
+    #chunks = text_splitter.split_documents(documents)
     print(f"Разделено {len(documents)} документов на {len(chunks)} фрагментов.")
 
     # Удаление дубликатов, на основе хэш
@@ -84,10 +88,11 @@ def generate_db(chunks: list[Document]):
         persist_directory=CHROMA_DB_PATH
     )
 
-    print(f"Saved {len(chunks)} chunks to {CHROMA_DB_PATH}.")
+    print(f"Записано {len(chunks)} фрагментов в {CHROMA_DB_PATH}.")
 
 if __name__ == "__main__":
     tic = time.perf_counter()
     ls = load_documents(DATA_PATH, ".md")
     chunks=split_text(ls)
     generate_db(chunks)
+    print(f"Время выполнения {(time.perf_counter() - tic):.2f} сек.")
