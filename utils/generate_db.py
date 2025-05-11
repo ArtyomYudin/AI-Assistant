@@ -56,15 +56,15 @@ def split_text(documents: list[Document]):
 
     md_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers, strip_headers=False)
 
-    chunks = []
-    for doc in documents:
-        parsed_chunks = md_splitter.split_text(doc.page_content)
-        for chunk in parsed_chunks:
-            chunk.metadata['source'] = doc.metadata['source']
-        chunks.extend(parsed_chunks)
+    # chunks = []
+    # for doc in documents:
+    #     parsed_chunks = md_splitter.split_text(doc.page_content)
+    #     for chunk in parsed_chunks:
+    #         chunk.metadata['source'] = doc.metadata['source']
+    #     chunks.extend(parsed_chunks)
 
     # Разделение документов на более мелкие части с помощью текстового разделителя
-    #chunks = text_splitter.split_documents(documents)
+    chunks = text_splitter.split_documents(documents)
     print(f"Разделено {len(documents)} документов на {len(chunks)} фрагментов.")
 
     # Удаление дубликатов, на основе хэш
