@@ -6,8 +6,8 @@ import requests
 os.environ['USER_AGENT'] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 
 from urllib.parse import urlparse
-from bs4 import BeautifulSoup
-from langchain_community.document_loaders import AsyncHtmlLoader
+from bs4 import BeautifulSoup, SoupStrainer
+from langchain_community.document_loaders import AsyncHtmlLoader, WebBaseLoader
 from langchain_community.document_transformers import Html2TextTransformer, BeautifulSoupTransformer
 
 root = pathlib.Path(__file__).parent.parent.resolve()
@@ -60,15 +60,20 @@ def get_all_internal_links(url: str, max_depth=1):
 
 # Асинхронная загрузка ссылок и трансформация в чистый ASCII (MarkDown)
 def async_loader(links):
-    loader = AsyncHtmlLoader(links)
+    # TODO: необходимо избавиться от тегов <ul>
+    loader = AsyncHtmlLoader("https://center-inform.ru/about/patent/")
     docs = loader.load()
 
     # Получение чистого HTML без лишних классов
     bs_transformer = BeautifulSoupTransformer()
     for doc in docs:
         doc.page_content = bs_transformer.remove_unwanted_classnames(doc.page_content,
-                                                                     ['top-column', 'breadcrumb-navigation',
+                                                                       ['top-column', 'breadcrumb-navigation',
                                                                       'dv-copy', 'dv-contact-inc', 'dv-botmenu'])
+        # bs = BeautifulSoup(doc.page_content, features="lxml")
+        # for ul in bs.find_all('ul'):
+        #     print(ul)
+        #     ul.decompose()
 
     # Преобразование в ASCII (MarkDown)
     html_to_text = Html2TextTransformer(ignore_links=True, ignore_images=True)
