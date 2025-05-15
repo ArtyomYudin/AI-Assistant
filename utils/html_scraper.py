@@ -1,10 +1,12 @@
 import pathlib
 import os
+import pprint
 import time
 import requests
 
 os.environ['USER_AGENT'] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 
+from markdownify import markdownify as md, MarkdownConverter
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup, SoupStrainer
 from langchain_community.document_loaders import AsyncHtmlLoader, WebBaseLoader
@@ -34,7 +36,10 @@ def get_all_internal_links(url: str, max_depth=1):
         #link = tag_a["href"]
         internal_link= tag_a.get("href", "")
         # исключаем ненужные ссылки
-        if all(not internal_link.startswith(prefix) for prefix in EXCLUDED_PREFIX):
+        # так как ссылка может быть вида /about/awards/#382
+        # отделяем последнюю составляющую пути  internal_link.split('/')[-1]
+        # в результате получаем #382 и проверяем ее на префиксы для исключения
+        if all(not internal_link.split('/')[-1].startswith(prefix) for prefix in EXCLUDED_PREFIX):
             # проверяем относительная ли абсолютная ссылка
             # /about - относительная ссылка
             # https://domain.com/about - абсолютная ссылка
@@ -61,23 +66,34 @@ def get_all_internal_links(url: str, max_depth=1):
 # Асинхронная загрузка ссылок и трансформация в чистый ASCII (MarkDown)
 def async_loader(links):
     # TODO: необходимо избавиться от тегов <ul>
-    loader = AsyncHtmlLoader("https://center-inform.ru/about/patent/")
+    loader = AsyncHtmlLoader(links)
     docs = loader.load()
 
     # Получение чистого HTML без лишних классов
     bs_transformer = BeautifulSoupTransformer()
     for doc in docs:
-        doc.page_content = bs_transformer.remove_unwanted_classnames(doc.page_content,
-                                                                       ['top-column', 'breadcrumb-navigation',
-                                                                      'dv-copy', 'dv-contact-inc', 'dv-botmenu'])
-        # bs = BeautifulSoup(doc.page_content, features="lxml")
-        # for ul in bs.find_all('ul'):
-        #     print(ul)
-        #     ul.decompose()
+        doc.page_content = bs_transformer.remove_unwanted_classnames(
+            doc.page_content,
+            ["top-column", "breadcrumb-navigation",
+             "dv-copy", "dv-contact-inc", "dv-botmenu"])
 
+        doc.page_content = bs_transformer.remove_unwanted_tags(
+            doc.page_content,
+            unwanted_tags=["head", "script", "noscript", "ul"])
+
+        #doc.page_content = bs_transformer.remove_unnecessary_lines(doc.page_content)
+
+        #soup = BeautifulSoup(doc.page_content, 'lxml')
+        # removals = soup.find_all('div', {'id': 'footer'})
+        # for match in removals:
+        #     match.decompose()
+
+
+    #print(docs[0])
     # Преобразование в ASCII (MarkDown)
     html_to_text = Html2TextTransformer(ignore_links=True, ignore_images=True)
     docs_transformed = html_to_text.transform_documents(docs)
+
 
     # Сохранение преобразованных документов в файлы
     for idx, doc in enumerate(docs_transformed):
@@ -90,5 +106,6 @@ def async_loader(links):
 if __name__ == "__main__":
     get_all_internal_links(HOST, max_depth=0)
     tic = time.perf_counter()
+    pprint.pprint(internal_links)
     async_loader(list(internal_links))
     print(f'Список из {len(internal_links)} ссылок обработан за {(time.perf_counter() - tic):.2f} сек.')

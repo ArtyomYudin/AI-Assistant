@@ -64,8 +64,8 @@ messages = trim_messages(chat_history[session_id], strategy="last", token_counte
                              max_tokens=2056, start_on="human", allow_partial=False)
 
 
-response_text = document_chain.invoke({"context": vector_store.similarity_search("python palindrome", k=3),
-                                                  "question": "python palindrome",
+response_text = document_chain.invoke({"context": vector_store.similarity_search("Выведи список всех лицензий", k=4),
+                                                  "question": "Выведи список всех лицензий",
                                                   "chat_history": messages})
 
 print(response_text)

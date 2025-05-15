@@ -55,27 +55,27 @@ def split_text(documents: list[Document]):
     #     length_function=len,  # Функция для вычисления длины текста
     #     add_start_index=True,  # Флаг для добавления начального индекса к каждому фрагменту
     # )
-    text_splitter = MarkdownTextSplitter(
-        chunk_size=380,  # Размер каждого фрагмента в символах
-        chunk_overlap=80,  # Перекрытие между последовательными фрагментами
-        length_function=len,  # Функция для вычисления длины текста
-    )
+    # text_splitter = MarkdownTextSplitter(
+    #     chunk_size=380,  # Размер каждого фрагмента в символах
+    #     chunk_overlap=80,  # Перекрытие между последовательными фрагментами
+    #     length_function=len,  # Функция для вычисления длины текста
+    # )
 
-    # headers = [("#", "Header 1"),
-    #            ("##", "Header 2"),
-    #            ("###", "Header 3")]
-    #
-    # md_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers, strip_headers=False)
-    #
-    # chunks = []
-    # for doc in documents:
-    #     parsed_chunks = md_splitter.split_text(doc.page_content)
-    #     for chunk in parsed_chunks:
-    #         chunk.metadata['source'] = doc.metadata['source']
-    #     chunks.extend(parsed_chunks)
+    headers = [("#", "Header 1"),
+               ("##", "Header 2"),
+               ("###", "Header 3")]
+
+    md_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers, strip_headers=False)
+
+    chunks = []
+    for doc in documents:
+        parsed_chunks = md_splitter.split_text(doc.page_content)
+        for chunk in parsed_chunks:
+            chunk.metadata['source'] = doc.metadata['source']
+        chunks.extend(parsed_chunks)
 
     # Разделение документов на более мелкие части с помощью текстового разделителя
-    chunks = text_splitter.split_documents(documents)
+    # chunks = text_splitter.split_documents(documents)
     print(f"Разделено {len(documents)} документов на {len(chunks)} фрагментов.")
 
     # Удаление дубликатов, на основе хэш
@@ -97,7 +97,7 @@ def generate_db(chunks: list[Document]):
         shutil.rmtree(CHROMA_DB_PATH)
 
     # Создайте новую базу данных Chroma из документов
-    vector_store = Chroma.from_documents(
+    Chroma.from_documents(
         documents=chunks,
         persist_directory=CHROMA_DB_PATH,
         embedding=EMBEDDINGS,
@@ -111,6 +111,6 @@ def generate_db(chunks: list[Document]):
 if __name__ == "__main__":
     tic = time.perf_counter()
     ls = load_documents(DATA_PATH, ".md")
-    chunks=split_text(ls)
-    generate_db(chunks)
+    documents_chunks=split_text(ls)
+    generate_db(documents_chunks)
     print(f"Время выполнения {(time.perf_counter() - tic):.2f} сек.")
