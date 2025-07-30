@@ -1,7 +1,7 @@
 # AI-Assistant
 
-## Хост:
-    сервер IBM x3650 M5, 2х E5-2695 v3, 96GB Ram
+## Host:
+    server IBM x3650 M5, 2х E5-2695 v3, 96GB Ram
     2x AMD Instinct mi50 16Gb
     Ubuntu 24.04
     ROCm 6.3
@@ -53,6 +53,5 @@
     Embedding model - Qwen3-Embedding-4B
 
 
-В дальнейшем будет произведена оптимизация для повышения производительности
-
+In the future, the launch of LLM models will be optimized to improve performance.
 
