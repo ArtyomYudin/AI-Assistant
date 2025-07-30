@@ -6,10 +6,9 @@ import requests
 
 os.environ['USER_AGENT'] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 
-from markdownify import markdownify as md, MarkdownConverter
 from urllib.parse import urlparse
-from bs4 import BeautifulSoup, SoupStrainer
-from langchain_community.document_loaders import AsyncHtmlLoader, WebBaseLoader
+from bs4 import BeautifulSoup
+from langchain_community.document_loaders import AsyncHtmlLoader
 from langchain_community.document_transformers import Html2TextTransformer, BeautifulSoupTransformer
 
 root = pathlib.Path(__file__).parent.parent.resolve()
@@ -55,14 +54,6 @@ def get_all_internal_links(url: str, max_depth=1):
             get_all_internal_links(internal_link, max_depth=max_depth - 1)
 
 
-# Получение списка ссылок, предварительно удалив лишние пробелы
-# def get_links_to_parse() -> list:
-#     try:
-#         with open(FILE_TO_PARSE, "r") as f:
-#             return [link.strip() for link in f.readlines()]
-#     except:
-#         return []
-
 # Асинхронная загрузка ссылок и трансформация в чистый ASCII (MarkDown)
 def async_loader(links):
     # TODO: необходимо избавиться от тегов <ul>
@@ -81,26 +72,16 @@ def async_loader(links):
             doc.page_content,
             unwanted_tags=["head", "script", "noscript", "ul"])
 
-        #doc.page_content = bs_transformer.remove_unnecessary_lines(doc.page_content)
-
-        #soup = BeautifulSoup(doc.page_content, 'lxml')
-        # removals = soup.find_all('div', {'id': 'footer'})
-        # for match in removals:
-        #     match.decompose()
-
-
-    #print(docs[0])
     # Преобразование в ASCII (MarkDown)
     html_to_text = Html2TextTransformer(ignore_links=True, ignore_images=True)
     docs_transformed = html_to_text.transform_documents(docs)
 
-
     # Сохранение преобразованных документов в файлы
     for idx, doc in enumerate(docs_transformed):
+        # Удаление HTML комментариев
         with open(f"{DIR_TO_STORE}/document_{idx}.md", "w+", encoding="utf-8") as f:
-            f.write(doc.page_content)
+            f.write(doc.page_content.strip())
             print(f"Файл {DIR_TO_STORE}/document_{idx}.md сохранен")
-
 
 
 if __name__ == "__main__":
