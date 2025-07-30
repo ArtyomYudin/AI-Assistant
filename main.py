@@ -13,10 +13,10 @@ def main():
     rag_system.setup_qa_chain()
 
     # # Поиск похожих документов
-    # similar_docs = rag_system.search_similar_documents("Что курирует Перминов?", k=5)
-    # print("Похожие документы:")
-    # for doc in similar_docs:
-    #     print(f"Score: {doc['score']:.3f} - {doc['content'][:100]}...")
+    similar_docs = rag_system.search_similar_documents("список директоров?", k=5)
+    print("Похожие документы:")
+    for doc in similar_docs:
+        print(f"Score: {doc['score']:.3f} - {doc['content'][:100]}...")
 
     # Ответ на вопрос
     # answer = rag_system.ask_question_rag("что курирует павлов?")
@@ -25,15 +25,15 @@ def main():
     # print("Источники:")
     # for source in answer['sources']:
     #     print(f"  - {source['content'][:100]}...")
-    print("\nWelcome to Interactive Q&A System!")
-    print("Enter 'q' or 'quit' to exit.")
-    while True:
-        question = input("\nPlease enter your question: ")
-        if question.lower() in ["q", "quit"]:
-            print("\nThank you for using! Goodbye!")
-            break
-
-        output =  rag_system.ask_question_rag(question)
+    # print("\nWelcome to Interactive Q&A System!")
+    # print("Enter 'q' or 'quit' to exit.")
+    # while True:
+    #     question = input("\nPlease enter your question: ")
+    #     if question.lower() in ["q", "quit"]:
+    #         print("\nThank you for using! Goodbye!")
+    #         break
+    #
+    #     output =  rag_system.ask_question_rag(question)
 
 
 if __name__ == "__main__":

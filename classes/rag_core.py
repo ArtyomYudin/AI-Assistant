@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 
 root = pathlib.Path(__file__).parent.parent.resolve()
 
+
+HEADERS_TO_SPLIT_ON = [
+    ("#", "Header1"),
+    ("##", "Header2"),
+    ("###", "Header3"),
+    ("####", "Header4"),
+]
+
 class RAGCore:
     def __init__(self,
                  llm_name: str = "Qwen3-8B-AWQ",
@@ -51,8 +59,8 @@ class RAGCore:
             api_key="EMPTY",
             base_url=llm_base_url,
             extra_body={"chat_template_kwargs": {"enable_thinking":False}},
-            max_tokens=512,
-            temperature=0.9,
+            #max_tokens=512,
+            temperature=0.3,
             streaming=True,
             callbacks=[StreamingStdOutCallbackHandler()],
         )
@@ -60,15 +68,26 @@ class RAGCore:
         # Рекурсивное разбиение с учетом структуры MD
         self.recursive_splitter = RecursiveCharacterTextSplitter(
             chunk_size=500,
-            chunk_overlap=50,
+            chunk_overlap=100,
             separators=[
-                "\n#{1,6} ",  # Заголовки
-                "```\n",  # Блоки кода
-                "\n\n",  # Параграфы
-                "\n",  # Строки
-                ". ",  # Предложения
-                " ",  # Пробелы
-                ""  # Символы
+                # "\n#{1,6} ",  # Заголовки
+                # "```\n",  # Блоки кода
+                # "\n\n",  # Параграфы
+                # "\n",  # Строки
+                # ". ",  # Предложения
+                # " ",  # Пробелы
+                # ""  # Символы
+                "\n\n",
+                "\n",
+                " ",
+                ".",
+                ",",
+                "\u200b",
+                "\uff0c",
+                "\u3001",
+                "\uff0e",
+                "\u3002",
+                "",
             ],
             length_function=len,
             is_separator_regex=False,
@@ -76,18 +95,26 @@ class RAGCore:
 
         # Инициализация сплиттера по заголовкам
         self.header_splitter = MarkdownHeaderTextSplitter(
-            headers_to_split_on=[
-                ("#", "Header1"),
-                 ("##", "Header2"),
-                 ("###", "Header3"),
-                 ("####", "Header4"),
-            ], strip_headers=False
+            headers_to_split_on=HEADERS_TO_SPLIT_ON
         )
 
         # Инициализация векторной базы данных
         self.vectorstore = None
         self.retriever = None
         self.qa_chain = None
+
+
+    def get_header_values(self, split_doc: Document,) -> list[str]:
+        """
+        Получите текстовые значения заголовков в документе, полученном в результате разделения.
+        """
+        header_keys = [header_key for _, header_key in HEADERS_TO_SPLIT_ON]
+
+        return [
+            header_value
+            for header_key in header_keys
+            if (header_value := split_doc.metadata.get(header_key)) is not None
+        ]
 
 
     def load_documents_from_directory(self,
@@ -146,6 +173,7 @@ class RAGCore:
         Разбиение по заголовкам с сохранением иерархии
         """
         chunks = []
+        chunk_text = ""
 
         try:
             for doc in load_documents:
@@ -159,8 +187,28 @@ class RAGCore:
                     if len(header_doc.page_content) > self.recursive_splitter._chunk_size:
                         # Если раздел большой - дополнительно разбиваем
                         sub_docs = self.recursive_splitter.split_documents([header_doc])
+
+                        # Add header content to retain context and improve retrieval
+                        for sub_doc in sub_docs:
+                            header_values = self.get_header_values(sub_doc)
+                            #sub_doc_content = ""
+                            sub_doc_header = ""
+                            for header_value in header_values:
+                                sub_doc_header = header_value + "\n"
+                            sub_doc_content = sub_doc.page_content
+                            sub_doc.page_content = sub_doc_header + sub_doc_content
+
                         chunks.extend(sub_docs)
                     else:
+                        # Add header content to retain context and improve retrieval
+                        #header_doc_content = ""
+                        header_doc_header = ""
+                        header_values = self.get_header_values(header_doc)
+                        for header_value in header_values:
+                            header_doc_header += header_value + "\n"
+                        header_doc_content = header_doc.page_content
+                        header_doc.page_content = header_doc_header + header_doc_content
+
                         chunks.append(header_doc)
 
             return chunks
@@ -192,7 +240,7 @@ class RAGCore:
                 # consistency_level="Eventually",
                  index_params={
                      "metric_type": "COSINE",
-                #     "index_type": "AUTOINDEX",
+                     "index_type": "AUTOINDEX",
                      "params": {}}
             )
 
@@ -213,13 +261,13 @@ class RAGCore:
 
         if search_kwargs is None:
             search_kwargs = {
-                "k": 3,  # Количество результатов
-                "score_threshold": 0.3  # Порог релевантности
-                #"fetch_k": 50
+                "k": 5,  # Количество результатов
+                "score_threshold": 0.3,  # Порог релевантности
+                "fetch_k": 50
             }
 
         self.retriever = self.vectorstore.as_retriever(
-            search_type="similarity",
+            search_type="similarity_score_threshold", # similarity_score_threshold, similarity
             search_kwargs=search_kwargs
         )
 
