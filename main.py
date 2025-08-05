@@ -1,10 +1,11 @@
 # main.py
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
 import logging
+import json
 
 from classes.rag_core import RAGCore
 
@@ -90,7 +91,63 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-# === Маршруты API ===
+# Маршруты API
+
+# WebSocket
+@app.websocket("/ws/ask")
+async def websocket_ask(websocket: WebSocket):
+    await websocket.accept()
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            payload = json.loads(data)
+            question = payload.get("question")
+            session_id = payload.get("session_id", "default")
+
+            if not question:
+                await websocket.send_text(json.dumps({"type": "error", "data": "Нет вопроса"}, ensure_ascii=False))
+                continue
+
+            # # Отправляем источники
+            # relevant_docs = rag.retriever.get_relevant_documents(question)
+            # sources = [
+            #     {
+            #         "source": doc.metadata.get("source", "Неизвестный источник"),
+            #         "content": doc.page_content.strip(),
+            #         "score": getattr(doc, "score", None),
+            #     }
+            #     for doc in relevant_docs
+            # ]
+            # await websocket.send_text(
+            #     json.dumps({"type": "sources", "data": sources[:3]}, ensure_ascii=False)
+            # )
+
+            # Потоковая генерация ответа
+            chain = rag.qa_chain_with_history
+            config = {"configurable": {"session_id": session_id}}
+
+            async for token in chain.astream(
+                {"question": question},
+                config=config,
+            ):
+                text = token.strip()
+                if text:
+                    await websocket.send_text(
+                        json.dumps({"type": "token", "data": text}, ensure_ascii=False)
+                    )
+
+            # Завершение
+            await websocket.send_text(
+                json.dumps({"type": "end", "data": "stream_end"}, ensure_ascii=False)
+            )
+
+    except WebSocketDisconnect:
+        logger.info("Клиент отключился")
+    except Exception as e:
+        logger.error(f"Ошибка в WebSocket: {e}")
+        await websocket.send_text(json.dumps({"type": "error", "data": str(e)}, ensure_ascii=False))
+
 
 @app.post("/ask", response_model=AnswerResponse)
 async def ask_question(request: QuestionRequest):

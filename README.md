@@ -1,7 +1,8 @@
 # AI-Assistant
 
 ## Dependencies
-pip install --upgrade --quiet  langchain langchain-core langchain-community langchain-milvus langchain-openai bs4
+pip install --upgrade --quiet  langchain langchain-core langchain-community langchain-milvus langchain-openai bs4 fastapi \
+    uvicorn gradio
 
 ## Host:
     server IBM x3650 M5, 2х E5-2695 v3, 96GB Ram
@@ -63,7 +64,8 @@ pip install --upgrade --quiet  langchain langchain-core langchain-community lang
 In the future, the launch of LLM models will be optimized to improve performance.
 
 
-
+# Start
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 
 

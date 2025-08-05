@@ -69,7 +69,7 @@ class RAGCore:
             model=llm_name,
             api_key="EMPTY",
             base_url=llm_base_url,
-            max_tokens=4096,
+            max_tokens=8192,
             temperature=0.7,
             streaming=True,
             callbacks=[StreamingStdOutCallbackHandler()],
@@ -79,7 +79,7 @@ class RAGCore:
         # Рекурсивное разбиение с учетом структуры MD
         self.recursive_splitter = RecursiveCharacterTextSplitter(
             chunk_size=500,
-            chunk_overlap=50,
+            chunk_overlap=100,
             separators=[
                 # "\n#{1,6} ",  # Заголовки
                 # "```\n",  # Блоки кода
@@ -197,17 +197,17 @@ class RAGCore:
                 if len(header_doc.page_content) > self.recursive_splitter._chunk_size:
                     # Если раздел большой - дополнительно разбиваем
                     sub_docs = self.recursive_splitter.split_documents([header_doc])
-                    # Добавляем заголовок, чтобы сохранить контекст и улучшить поиск
-                    for sub_doc in sub_docs:
-                        headers= self.get_header_values(sub_doc)
-                        header_text = " > ".join(headers) + "\n" if headers else ""
-                        sub_doc.page_content = header_text + sub_doc.page_content
+                    # # Добавляем заголовок, чтобы сохранить контекст и улучшить поиск
+                    # for sub_doc in sub_docs:
+                    #     headers= self.get_header_values(sub_doc)
+                    #     header_text = " > ".join(headers) + "\n" if headers else ""
+                    #     sub_doc.page_content = header_text + sub_doc.page_content
                     chunks.extend(sub_docs)
                 else:
-                    # Добавляем заголовок, чтобы сохранить контекст и улучшить поиск
-                    headers = self.get_header_values(header_doc)
-                    header_text = " > ".join(headers) + "\n" if headers else ""
-                    header_doc.page_content = header_text + header_doc.page_content
+                    # # Добавляем заголовок, чтобы сохранить контекст и улучшить поиск
+                    # headers = self.get_header_values(header_doc)
+                    # header_text = " > ".join(headers) + "\n" if headers else ""
+                    # header_doc.page_content = header_text + header_doc.page_content
                     chunks.append(header_doc)
 
         logger.info(f"Разделено {len(load_documents)} документов на {len(chunks)} фрагментов.")
@@ -239,17 +239,16 @@ class RAGCore:
         # e5_embeddings = E5MistralEmbeddings(self.embeddings)
 
         # Параметры индекса (нужно поиграться бля большей производительности)
-
         dense_index_param= {
             "metric_type": "COSINE",
             "index_type": "HNSW",
-            "params": {"nlist": 128},
+            # "params": {"nlist": 128},
         }
 
         sparse_index_param = {
             "metric_type": "BM25",
             "index_type": "SPARSE_INVERTED_INDEX",
-            "params": {"drop_ratio_build": 0.2},
+            # "params": {"drop_ratio_build": 0.2},
         }
 
         try:
@@ -276,7 +275,7 @@ class RAGCore:
             raise
 
 
-    def create_retriever(self, k: int = 6, fetch_k: int = 20) -> None:
+    def create_retriever(self, k: int = 7, fetch_k: int = 20) -> None:
         """
         Создание ретривера для поиска
         """
@@ -287,7 +286,7 @@ class RAGCore:
         base_retriever = self.vectorstore.as_retriever(
             search_kwargs={
             "k": k,
-            "ranker_type": "weighted",  # или "rrf"
+            "ranker_type": "weighted",  # или "rrf, weighted"
             "ranker_params": {"weights": [0.6, 0.4]},
         })
 
