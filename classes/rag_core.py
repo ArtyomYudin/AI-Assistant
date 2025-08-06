@@ -9,9 +9,10 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.callbacks import StreamingStdOutCallbackHandler
 from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
 from langchain_milvus import Milvus, BM25BuiltInFunction
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.documents import Document
+from langchain.retrievers import MultiQueryRetriever
 
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.chat_history import InMemoryChatMessageHistory
@@ -28,7 +29,6 @@ from classes.e5_mistrall_embeddings import E5MistralEmbeddings
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-global_unique_hashes = set()
 root = pathlib.Path(__file__).parent.parent.resolve()
 
 HEADERS_TO_SPLIT_ON = [
@@ -48,6 +48,8 @@ class RAGCore:
                  milvus_base_uri: str = "http://10.1.0.2:19530",
                  collection_name: str = "demo_ci_rag",
                  ):
+
+        self.global_unique_hashes = set()
 
         self.collection_name = collection_name
         self.milvus_connection_args = {"uri": milvus_base_uri}
@@ -72,7 +74,7 @@ class RAGCore:
             max_tokens=8192,
             temperature=0.7,
             streaming=True,
-            callbacks=[StreamingStdOutCallbackHandler()],
+            # callbacks=[StreamingStdOutCallbackHandler()],
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
 
@@ -88,11 +90,12 @@ class RAGCore:
                 # ". ",  # Предложения
                 # " ",  # Пробелы
                 # ""  # Символы
-                "\n\n",
-                "\n",
-                " ",
-                ".",
-                ",",
+                "\n\n",  # параграфы
+                "\n",  # строки
+                " ",  # пробелы
+                ".",  # предложения
+                ",",  # запятые
+                ""
             ],
             length_function=len,
             # is_separator_regex=False,
@@ -194,20 +197,18 @@ class RAGCore:
                 # # Пропускаем только заголовки без содержания
                 # if re.match(r'^#+\s+[^\n]*\s*$', header_doc.page_content):
                 #     continue
+                headers = self.get_header_values(header_doc)
+                header_text = " > ".join(headers) + "\n" if headers else ""
                 if len(header_doc.page_content) > self.recursive_splitter._chunk_size:
                     # Если раздел большой - дополнительно разбиваем
                     sub_docs = self.recursive_splitter.split_documents([header_doc])
-                    # # Добавляем заголовок, чтобы сохранить контекст и улучшить поиск
-                    # for sub_doc in sub_docs:
-                    #     headers= self.get_header_values(sub_doc)
-                    #     header_text = " > ".join(headers) + "\n" if headers else ""
-                    #     sub_doc.page_content = header_text + sub_doc.page_content
+                    # Добавляем заголовок, чтобы сохранить контекст и улучшить поиск
+                    for sub_doc in sub_docs:
+                        sub_doc.page_content = header_text + sub_doc.page_content
                     chunks.extend(sub_docs)
                 else:
-                    # # Добавляем заголовок, чтобы сохранить контекст и улучшить поиск
-                    # headers = self.get_header_values(header_doc)
-                    # header_text = " > ".join(headers) + "\n" if headers else ""
-                    # header_doc.page_content = header_text + header_doc.page_content
+                    # Добавляем заголовок, чтобы сохранить контекст и улучшить поиск
+                    header_doc.page_content = header_text + header_doc.page_content
                     chunks.append(header_doc)
 
         logger.info(f"Разделено {len(load_documents)} документов на {len(chunks)} фрагментов.")
@@ -216,9 +217,9 @@ class RAGCore:
         unique_chunks = []
         for chunk in chunks:
             chunk_hash = self.hash_text(chunk.page_content)
-            if chunk_hash not in global_unique_hashes:
+            if chunk_hash not in self.global_unique_hashes:
                 unique_chunks.append(chunk)
-                global_unique_hashes.add(chunk_hash)
+                self.global_unique_hashes.add(chunk_hash)
 
         logger.info(f"Количество Уникальных фрагментов {len(unique_chunks)}.")
 
@@ -242,7 +243,12 @@ class RAGCore:
         dense_index_param= {
             "metric_type": "COSINE",
             "index_type": "HNSW",
-            # "params": {"nlist": 128},
+            "params": {
+                "M": 16,
+                "efConstruction": 200,
+                "ef": 100  # чем выше — точнее, но медленнее
+                # ef — влияет на качество поиска. В поиске можно поставить ef=100, при построении — efConstruction=200.
+            },
         }
 
         sparse_index_param = {
@@ -286,20 +292,31 @@ class RAGCore:
         base_retriever = self.vectorstore.as_retriever(
             search_kwargs={
             "k": k,
+            "fetch_k": fetch_k,
             "ranker_type": "weighted",  # или "rrf, weighted"
-            "ranker_params": {"weights": [0.6, 0.4]},
+            "ranker_params": {"weights": [0.6, 0.4], "lambda": 0.5}, # lambda=0.5 — баланс между точностью и полнотой.
+                # Можно поиграть с lambda от 0.1 (больше внимания точности) до 0.9 (полнота).
         })
 
         # MultiQuery: генерация нескольких версий запроса
-        # multiquery_retriever = MultiQueryRetriever.from_llm(
-        #     retriever=base_retriever,
-        #     llm=self.llm,
-        #     include_original=True  # включаем оригинал
-        # )
+        multi_query_prompt = PromptTemplate.from_template("""
+        Вы — помощник поиска организации АО «ЦентрИнформ». Ваша задача — сгенерировать несколько различных формулировок одного и того же запроса на русском языке, чтобы улучшить поиск в базе знаний.
+        Оригинальный вопрос: {question}
 
-        # self.retriever = multiquery_retriever
+        Создайте 3 альтернативные формулировки этого вопроса, каждую с новой строки.
+        Семантика должна сохраняться. Не нумеруйте строки. Не добавляйте пояснений.
+        """.strip())
 
-        self.retriever = base_retriever
+        llm_with_queries = self.llm.bind(n=2)
+        multiquery_retriever = MultiQueryRetriever.from_llm(
+            retriever=base_retriever,
+            llm=llm_with_queries,
+            prompt=multi_query_prompt,
+            include_original=True,  # включаем оригинал
+        )
+        self.retriever = multiquery_retriever
+
+        # self.retriever = base_retriever
 
         logger.info("Ретривер создан")
 
@@ -349,10 +366,10 @@ class RAGCore:
         # def format_docs(docs):
         #     return "\n\n".join(doc.page_content.strip() for doc in docs)
 
-        def format_docs(docs: List[Document]) -> str:
-            return "\n\n".join(
+        def format_docs(docs: List[Document], max_docs: int = 10) -> str:
+            return "\n".join(
                 f"[Источник: {doc.metadata.get('source', 'N/A')}] {doc.page_content.strip()}"
-                for doc in docs
+                for doc in docs[:max_docs]
             )
 
         chain = (
@@ -377,7 +394,7 @@ class RAGCore:
         logger.info("Цепочка QA настроена")
 
 
-    def search_similar_documents(self, query: str, k: int = 5) -> List[Dict]:
+    def search_similar_documents(self, query: str, k: int = 5, fetch_k = 20) -> List[Dict]:
         """
         Поиск похожих документов
         """
@@ -385,7 +402,12 @@ class RAGCore:
             return []
 
         try:
-            docs = self.vectorstore.similarity_search_with_score(query, k=k, ranker_type="weighted", ranker_params={"weights": [0.6, 0.4]})
+            docs = self.vectorstore.similarity_search_with_score(
+                query, k=k,
+                fetch_k=fetch_k,
+                ranker_type="weighted",
+                ranker_params={"weights": [0.6, 0.4]}
+            )
             results = []
 
             for doc, score in docs:
