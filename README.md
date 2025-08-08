@@ -1,7 +1,7 @@
 # AI-Assistant
 
 ## Dependencies
-pip install --upgrade --quiet  langchain langchain-core langchain-community langchain-milvus langchain-openai bs4 fastapi \
+pip install --upgrade --quiet  langchain langchain-core langchain-community bs4 fastapi PyPDF2 \
     uvicorn gradio
 
 ## Host:
@@ -44,10 +44,26 @@ pip install --upgrade --quiet  langchain langchain-core langchain-community lang
 	    --swap-space 8 \
     	--disable-log-requests \
     	--dtype float16 \
-        --gpu-memory-utilization=0.90\
+        --gpu-memory-utilization=0.45\
 		--task embed \
         --port 8000 \
         --served-model-name multilingual-e5-large
+
+## Docker container GPU2 Reranker:
+    docker run -d --rm --device=/dev/kfd --device=/dev/dri --group-add video --shm-size 8G \
+	    --security-opt seccomp=unconfined \
+    	--security-opt apparmor=unconfined \
+    	--cap-add=SYS_PTRACE \
+    	-v /storage/models:/models \
+	    -p 8002:8002 \
+        --env CUDA_VISIBLE_DEVICES=1 \
+	    nalanzeyu/vllm-gfx906  vllm serve /models/BAAI/bge-reranker-v2-m3 \
+	    --swap-space 8 \
+    	--disable-log-requests \
+    	--dtype float16 \
+        --gpu-memory-utilization=0.45\
+        --port 8002 \
+        --served-model-name bge-reranker-v2-m3
 
 ## LLM
     LLM model:
@@ -66,7 +82,3 @@ In the future, the launch of LLM models will be optimized to improve performance
 
 # Start
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-
-
-
-
