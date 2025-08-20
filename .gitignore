@@ -96,3 +96,4 @@ GitHub.sublime-settings
 scraped_data/
 chroma_db/
 milvus_db/
+source_data/

@@ -1,0 +1,39 @@
+class RAGConfig:
+    # Модели
+    LLM_NAME = "Qwen3-8B-AWQ"
+    LLM_BASE_URL = "http://172.20.4.50:8001/v1"
+    EMBEDDING_NAME = "multilingual-e5-large"
+    EMBEDDING_BASE_URL = "http://172.20.4.50:8000/v1"
+    RERANKER_BASE_URL = "http://172.20.4.50:8002/v1/rerank"
+
+    MAX_CONTEXT_TOKENS = 8192   # Максимальное количество токенов контекста
+    MAX_HISTORY_MESSAGES = 5    # Максимальное количество сообщений в истории
+
+    # Milvus
+    MILVUS_URI = "http://10.3.0.5:19530"
+    COLLECTION_NAME = "demo_ci_rag"
+    RECREATE_COLLECTION = True  # Управление пересозданием коллекции
+    INDEX_BATCH_SIZE = 100
+    CHECK_DUPLICATES_IN_MILVUS = True  # Флаг для включения проверки дубликатов в Milvus
+
+    # Документы
+    CHUNK_SIZE = 500
+    CHUNK_OVERLAP = 100
+    MAX_CONTEXT_TOKENS = 8192
+    MAX_HISTORY_MESSAGES = 5
+
+    # Поиск
+    DEFAULT_K = 7
+    DEFAULT_FETCH_K = 20
+
+    #Шаблон
+    PROMPT_TEMPLATE = '"Вы — экспертный ассистент АО «ЦентрИнформ». Отвечайте ТОЛЬКО на основе контекста.\n" \
+                "Контекст:\n{context}\n\n" \
+                "История диалога:\n{chat_history}\n\n" \
+                "Текущий вопрос: {question}\n\n" \
+                "Правила:\n" \
+                "1. Только на основе контекста.\n" \
+                "2. На русском языке.\n" \
+                "3. Если нет — \'Информация не найдена\'.\n" \
+                "4. Без предположений.\n" \
+                "Ответ:"'

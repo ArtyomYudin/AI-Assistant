@@ -1,0 +1,480 @@
+import hashlib
+import logging
+import pathlib
+import re
+import tiktoken
+import glob
+import os
+import PyPDF2
+from typing import List, Dict, Any, Optional, AsyncGenerator
+from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
+from langchain_core.documents import Document
+from langchain_core.chat_history import InMemoryChatMessageHistory
+from pymilvus import Function, FunctionType, DataType, AnnSearchRequest
+from tqdm import tqdm
+from .rag_config import RAGConfig
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+root = pathlib.Path(__file__).parent.parent.resolve()
+
+# Константы
+HEADERS_TO_SPLIT_ON = [
+    ("#", "Header1"),
+    ("##", "Header2"),
+    ("###", "Header3"),
+    ("####", "Header4"),
+]
+DENSE_DIM = 1024
+SPARSE_DIM = 30522
+
+
+class RAGCore:
+    def __init__(self, config: Optional[RAGConfig] = None):
+        self.config = config or RAGConfig()
+        self.chat_histories: Dict[str, InMemoryChatMessageHistory] = {}
+        self._milvus_client = None
+        self._embeddings = None
+        self._llm = None
+
+        # Сплиттеры
+        self.recursive_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=self.config.CHUNK_SIZE,
+            chunk_overlap=self.config.CHUNK_OVERLAP,
+            separators=["\n\n", "\n", " ", ".", ",", ""],
+            length_function=len,
+        )
+        self.header_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=HEADERS_TO_SPLIT_ON)
+
+        # Токенизация
+        self.tokenizer = tiktoken.get_encoding("cl100k_base")
+        self.max_context_tokens = 8192
+
+        # Компоненты RAG
+        self.retriever = None
+        self.qa_chain_with_history = None
+
+
+    @property
+    def milvus_client(self):
+        if self._milvus_client is None:
+            from pymilvus import MilvusClient
+            self._milvus_client = MilvusClient(uri=self.config.MILVUS_URI)
+        return self._milvus_client
+
+    @property
+    def embeddings(self):
+        if self._embeddings is None:
+            from langchain_openai import OpenAIEmbeddings
+            self._embeddings = OpenAIEmbeddings(
+                model=self.config.EMBEDDING_NAME,
+                api_key="EMPTY",
+                base_url=self.config.EMBEDDING_BASE_URL,
+                embedding_ctx_length=512,
+                timeout=60,
+            )
+        return self._embeddings
+
+    @property
+    def llm(self):
+        if self._llm is None:
+            from langchain_openai import ChatOpenAI
+            self._llm = ChatOpenAI(
+                model=self.config.LLM_NAME,
+                api_key="EMPTY",
+                base_url=self.config.LLM_BASE_URL,
+                max_tokens=4096,
+                temperature=0.7,
+                streaming=True,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            )
+        return self._llm
+
+    def _count_tokens(self, text: str) -> int:
+        """Подсчёт токенов."""
+        return len(self.tokenizer.encode(text))
+
+    def _truncate_text_by_tokens(self, text: str, max_tokens: int) -> str:
+        """Обрезка текста по токенам."""
+        tokens = self.tokenizer.encode(text)
+        if len(tokens) <= max_tokens:
+            return text
+        return self.tokenizer.decode(tokens[:max_tokens])
+
+    def _get_session_history(self, session_id: str) -> InMemoryChatMessageHistory:
+        """Возвращает историю сессии с ограничением по длине."""
+        max_history_messages = getattr(self.config, "MAX_HISTORY_MESSAGES", 5)
+        if session_id not in self.chat_histories:
+            self.chat_histories[session_id] = InMemoryChatMessageHistory()
+        history = self.chat_histories[session_id]
+        if len(history.messages) > max_history_messages:
+            truncated = history.messages[-max_history_messages:]
+            new_history = InMemoryChatMessageHistory()
+            new_history.messages = truncated
+            self.chat_histories[session_id] = new_history
+            return new_history
+        return history
+
+    def _hash_text(self, text: str) -> str:
+        """SHA-256 хэш строки."""
+        return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+    def _clean_md_content(self, content: str) -> str:
+        """Очистка MD-контента от лишних элементов"""
+        # Удаление HTML комментариев
+        content = re.sub(r"<!--.*?-->", "", content, flags=re.DOTALL)
+        # Удаление ссылок в формате [text](url) оставляя текст
+        content = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", content)
+        # Удаление изображений
+        content = re.sub(r"!\[([^\]]*)\]\([^\)]+\)", "", content)
+        # Нормализация пробелов
+        # content = re.sub(r"\s+", " ", content)
+        # Удаление множественных пустых строк
+        content = re.sub(r"\n\s*\n", "\n\n", content)
+        return content.strip()
+
+    def load_documents_from_directory(
+        self,
+        directory_path: str = f"{root}/scraped_data",
+        file_extensions: Optional[List[str]] = None
+    ) -> List[Document]:
+        """Загрузка документов из директории."""
+        directory = pathlib.Path(directory_path)
+        if file_extensions is None:
+            file_extensions = ['*.pdf', '*.txt', '*.md']
+
+        if not directory.exists():
+            logger.warning(f"Директория {directory} не существует")
+            return []
+
+        documents = []
+        for extension in file_extensions:
+            for path in glob.glob(os.path.join(directory_path, extension)):
+                try:
+                    if path.endswith(".pdf"):
+                        with open(path, "rb") as f:
+                            reader = PyPDF2.PdfReader(f)
+                            text = "\n".join(page.extract_text() or "" for page in reader.pages)
+                        documents.append(Document(page_content=text, metadata={"source": path}))
+                    else:
+                        with open(path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        documents.append(Document(page_content=content, metadata={"source": path}))
+                except Exception as e:
+                    logger.error(f"Ошибка при загрузке {path}: {e}")
+        logger.info(f"Загружено {len(documents)} документов")
+        return documents
+
+    def split_by_headers(self, documents: List[Document]) -> List[Document]:
+        """Разделение по заголовкам с иерархией и дедупликацией."""
+        if not documents:
+            return []
+
+        chunks = []
+        for doc in documents:
+            content = self._clean_md_content(doc.page_content)
+            if not content.strip():
+                continue
+
+            try:
+                header_docs = self.header_splitter.split_text(content)
+            except Exception as e:
+                logger.warning(f"Ошибка при разбиении по заголовкам: {e}")
+                header_docs = [Document(page_content=content, metadata={})]
+
+            for h_doc in header_docs:
+                headers = [h_doc.metadata.get(key) for _, key in HEADERS_TO_SPLIT_ON if key in h_doc.metadata]
+                header_prefix = " > ".join(filter(None, headers)) + "\n" if headers else ""
+
+                if len(h_doc.page_content) > self.recursive_splitter._chunk_size:
+                    try:
+                        sub_docs = self.recursive_splitter.split_documents([h_doc])
+                        for sub in sub_docs:
+                            sub.page_content = header_prefix + sub.page_content
+                        chunks.extend(sub_docs)
+                    except Exception as e:
+                        logger.warning(f"Ошибка при рекурсивном разбиении: {e}")
+                        h_doc.page_content = header_prefix + h_doc.page_content
+                        chunks.append(h_doc)
+                else:
+                    h_doc.page_content = header_prefix + h_doc.page_content
+                    chunks.append(h_doc)
+
+        # Проверка дубликатов в Milvus
+        if not self.config.CHECK_DUPLICATES_IN_MILVUS or not self.milvus_client.has_collection(self.config.COLLECTION_NAME):
+            for chunk in chunks:
+                chunk.metadata['hash'] = self._hash_text(chunk.page_content)
+            return chunks
+
+        unique_chunks = []
+        for chunk in chunks:
+            chunk_hash = self._hash_text(chunk.page_content)
+            try:
+                # result = self.milvus_client.query(
+                #     collection_name=self.config.COLLECTION_NAME,
+                #     filter=f"hash == '{h}'",
+                #     output_fields=["id"]
+                # )
+                # if not result:
+                #     chunk.metadata['hash'] = h
+                #     unique_chunks.append(chunk)
+                search_result = self.milvus_client.search(
+                    collection_name=self.config.COLLECTION_NAME,
+                    data=[chunk_hash],  # Ищем по хэшу
+                    anns_field="hash",  # Поле для поиска
+                    limit=1,  # Нам нужен только один результат
+                    search_params={"metric_type": "HAMMING"},  # Или подходящий для строк, если FLAT индекс
+                    output_fields=["id", "hash"]  # Получаем id и хэш
+                )
+                # Проверяем, найден ли точный хэш (для HAMMING расстояние 0 означает точное совпадение)
+                # Для других метрик логика может отличаться
+                if search_result and search_result[0] and search_result[0][0].distance == 0 and search_result[0][
+                    0].entity.get("hash") == chunk_hash:
+                    # Хэш найден, пропускаем фрагмент (дубликат)
+                    logger.debug(f"Найден дубликат хэша: {chunk_hash[:16]}...")
+                    continue
+                else:
+                    # Хэш не найден, добавляем фрагмент
+                    chunk.metadata['hash'] = chunk_hash  # Добавляем хэш в метаданные
+                    unique_chunks.append(chunk)
+                    logger.debug(f"Добавлен новый фрагмент с хэшем: {chunk_hash[:16]}...")
+
+            except Exception as e:
+                logger.warning(f"Ошибка при проверке дубликата: {e}")
+                chunk.metadata['hash'] = chunk_hash
+                unique_chunks.append(chunk)
+
+        logger.info(f"Уникальных фрагментов: {len(unique_chunks)}")
+        return unique_chunks
+
+    def _create_collection_if_not_exists(self):
+        """Создание hybrid-коллекции в Milvus."""
+        if self.milvus_client.has_collection(self.config.COLLECTION_NAME):
+            if self.config.RECREATE_COLLECTION:
+                logger.info("Удаление существующей коллекции")
+                self.milvus_client.drop_collection(self.config.COLLECTION_NAME)
+            else:
+                logger.info("Используется существующая коллекция")
+                return
+
+        schema = self.milvus_client.create_schema(auto_id=True, description="CentrInform RAG")
+        schema.add_field(field_name="id", datatype=DataType.INT64, is_primary=True)
+        schema.add_field(field_name="text", datatype=DataType.VARCHAR, max_length=65535, enable_analyzer=True)
+        schema.add_field(field_name="source", datatype=DataType.VARCHAR, max_length=512)
+        schema.add_field(field_name="hash", datatype=DataType.VARCHAR, max_length=64)
+        schema.add_field(field_name="dense_vector", datatype=DataType.FLOAT_VECTOR, dim=DENSE_DIM)
+        schema.add_field(field_name="sparse_vector", datatype=DataType.SPARSE_FLOAT_VECTOR)
+
+        schema.add_function(Function(
+            name="text_bm25_emb",
+            input_field_names=["text"],
+            output_field_names=["sparse_vector"],
+            function_type=FunctionType.BM25,
+        ))
+
+        index_params = self.milvus_client.prepare_index_params()
+        index_params.add_index(
+            field_name="dense_vector", index_type="HNSW", metric_type="COSINE", params={"M": 16, "efConstruction": 200}
+        )
+        index_params.add_index(
+            field_name="sparse_vector", index_type="SPARSE_INVERTED_INDEX", metric_type="BM25"
+        )
+
+        # index_params.add_index(
+        #     index_name="hash_index",
+        #     field_name="hash",
+        #     index_type="FLAT",
+        #     metric_type="HAMMING"
+        #     # Или "JACCARD" для строк, или "L2" если хранить как бинарный вектор. HAMMING часто используется для хэшей.
+        #     # params={} # Обычно не требуются для FLAT
+        # )
+
+        self.milvus_client.create_collection(
+            self.config.COLLECTION_NAME,
+            schema=schema,
+            index_params=index_params
+        )
+        logger.info(f"Коллекция {self.config.COLLECTION_NAME} создана")
+
+    def setup_vectorstore(self, documents: List[Document]) -> None:
+        """Индексация документов в Milvus."""
+        if not documents:
+            logger.warning("Нет документов для индексации")
+            return
+
+        self._create_collection_if_not_exists()
+
+        processed_docs = self.split_by_headers(documents)
+        if not processed_docs:
+            logger.warning("Нет документов после обработки")
+            return
+
+        texts = [d.page_content for d in processed_docs]
+        sources = [d.metadata.get("source", "N/A") for d in processed_docs]
+        hashes = [d.metadata.get("hash") or self._hash_text(d.page_content) for d in processed_docs]
+
+        try:
+            dense_vectors = self.embeddings.embed_documents(texts)
+        except Exception as e:
+            logger.error(f"Ошибка при эмбеддингах: {e}")
+            raise
+
+        batch_size = getattr(self.config, "INDEX_BATCH_SIZE", 100)
+        data = [
+            {"text": t, "source": s, "hash": h, "dense_vector": dv}
+            for t, s, dv, h in zip(texts, sources, dense_vectors, hashes)
+        ]
+
+        successful = 0
+        for i in tqdm(range(0, len(data), batch_size), desc="Индексация"):
+            batch = data[i:i + batch_size]
+            try:
+                self.milvus_client.insert(self.config.COLLECTION_NAME, batch)
+                successful += len(batch)
+            except Exception as e:
+                logger.error(f"Ошибка при индексации батча: {e}")
+        self.milvus_client.flush(self.config.COLLECTION_NAME)
+        logger.info(f"Проиндексировано {successful} документов")
+
+    def _hybrid_search(self, query: str, k: int = 7, fetch_k: int = 20) -> List[Document]:
+        """Hybrid поиск с reranking."""
+        if not query.strip():
+            return []
+
+        if not self.milvus_client.has_collection(self.config.COLLECTION_NAME):
+            return []
+
+        try:
+            query_dense = self.embeddings.embed_query(query)
+            req_dense = AnnSearchRequest(data=[query_dense], anns_field="dense_vector", limit=fetch_k, param={"ef": 100})
+            req_sparse = AnnSearchRequest(data=[query], anns_field="sparse_vector", limit=fetch_k, param={"drop_ratio_search": 0.2})
+
+            ranker = Function(
+                name="vllm_semantic_ranker",
+                input_field_names=["text"],
+                function_type=FunctionType.RERANK,
+                params={
+                    "reranker": "model",
+                    "provider": "vllm",
+                    "queries": [query],
+                    "endpoint": getattr(self.config, "RERANKER_BASE_URL", ""),
+                    "maxBatch": 64,
+                    "truncate_prompt_tokens": 256,
+                }
+            )
+
+            results = self.milvus_client.hybrid_search(
+                collection_name=self.config.COLLECTION_NAME,
+                reqs=[req_dense, req_sparse],
+                ranker=ranker,
+                output_fields=["text", "source"],
+                limit=k
+            )
+
+            docs = []
+            if results and results[0]:
+                for res in results[0]:
+                    if hasattr(res, 'entity'):
+                        docs.append(Document(
+                            page_content=res.entity.get("text", ""),
+                            metadata={"source": res.entity.get("source", "N/A"), "score": getattr(res, 'score', 0)}
+                        ))
+            return docs
+        except Exception as e:
+            logger.error(f"Ошибка при поиске: {e}")
+            return []
+
+    def create_retriever(self, k: int = 7, fetch_k: int = 20) -> None:
+        """Создание ретривера."""
+        def retrieve(query: str) -> List[Document]:
+            return self._hybrid_search(query, k=k, fetch_k=fetch_k)
+        self.retriever = retrieve
+        logger.info("Ретривер создан")
+
+    def _build_context(self, docs: List[Document], session_id: str) -> str:
+        """Формирование контекста с учётом лимита токенов."""
+        available = self.max_context_tokens - 2048
+        history_obj = self._get_session_history(session_id)
+        history_text = "\n".join(f"{msg.type.capitalize()}: {msg.content}" for msg in history_obj.messages)
+        history_tokens = self._count_tokens(history_text)
+        available -= history_tokens + 512
+        available = max(0, available)
+
+        if available <= 0:
+            return ""
+
+        context_parts = []
+        current_tokens = 0
+        sorted_docs = sorted(docs, key=lambda d: d.metadata.get('score', 0), reverse=True)
+
+        for doc in sorted_docs:
+            text = f"[Источник: {doc.metadata.get('source', 'N/A')}] {doc.page_content.strip()}\n"
+            tokens = self._count_tokens(text)
+            if current_tokens + tokens > available:
+                remaining = available - current_tokens
+                if remaining > 50:
+                    context_parts.append(self._truncate_text_by_tokens(text, remaining))
+                break
+            context_parts.append(text)
+            current_tokens += tokens
+
+        return "".join(context_parts).strip()
+
+    def create_qa_generator(self) -> None:
+        """Создаёт асинхронный генератор ответов с историей."""
+        if not self.retriever:
+            raise ValueError("Ретривер не создан. Вызовите create_retriever().")
+
+        async def generate_answer_stream(question: str, session_id: str = "default") -> AsyncGenerator[str, None]:
+            if not question.strip():
+                yield "Пожалуйста, задайте вопрос."
+                return
+
+            docs = self.retriever(question)
+            if not docs:
+                yield "Информация не найдена."
+                return
+
+            context = self._build_context(docs, session_id)
+            if not context:
+                yield "Информация не найдена."
+                return
+
+            history_obj = self._get_session_history(session_id)
+            history_text = "\n".join(f"{msg.type.capitalize()}: {msg.content}" for msg in history_obj.messages)
+
+            prompt = (
+                "Вы — экспертный ассистент АО «ЦентрИнформ». Отвечайте ТОЛЬКО на основе контекста.\n"
+                "Контекст:\n{context}\n\n"
+                "История диалога:\n{chat_history}\n\n"
+                "Текущий вопрос: {question}\n\n"
+                "Правила:\n"
+                "1. Только на основе контекста.\n"
+                "2. На русском языке.\n"
+                "3. Если нет — 'Информация не найдена'.\n"
+                "4. Без предположений.\n"
+                "Ответ:"
+            ).format(context=context, chat_history=history_text, question=question)
+
+            history_obj.add_user_message(question)
+
+            full_response = ""
+            try:
+                async for chunk in self.llm.astream([{"role": "user", "content": prompt}]):
+                    if content := chunk.content:
+                        full_response += content
+                        yield content
+                history_obj.add_ai_message(full_response)
+            except Exception as e:
+                logger.error(f"Ошибка при генерации: {e}")
+                yield "Произошла ошибка при генерации ответа."
+
+        self.qa_chain_with_history = generate_answer_stream
+        logger.info("QA-генератор с streaming и историей настроен")
+
+    def close(self):
+        """Закрытие соединений."""
+        if hasattr(self.milvus_client, "close"):
+            self.milvus_client.close()
