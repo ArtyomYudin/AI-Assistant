@@ -27,6 +27,15 @@ QA_PROMPT_TEMPLATE = (
 )
 
 class RAGCore:
+    """
+      Основной класс, объединяющий все компоненты RAG-пайплайна:
+      - загрузка и индексация документов
+      - поиск по Milvus (векторное хранилище)
+      - генерация эмбеддингов
+      - кэширование эмбеддингов в Redis
+      - управление историей диалога
+      - генерация ответов с использованием LLM
+    """
     def __init__(self, config: Optional[RAGConfig] = None):
         # Загружаем конфиг или используем значения по умолчанию
         self.config = config or RAGConfig()
@@ -77,7 +86,10 @@ class RAGCore:
     #         )
     #     return self._embeddings
     def embeddings(self):
-        # Подключение локальной модели эмбеддингов (можно поменять на OpenAI)
+        """
+        Локальная или внешняя модель эмбеддингов.
+        При первом вызове создаётся объект.
+        """
         if self._embeddings is None:
             from core.local_embeddings import LocalEmbeddings
             self._embeddings = LocalEmbeddings(
@@ -89,7 +101,10 @@ class RAGCore:
 
     @property
     def llm(self):
-        # LLM-клиент (через LangChain-обертку для OpenAI API-совместимых серверов)
+        """
+        LLM-клиент (ChatOpenAI API-совместимый).
+        Используется для генерации ответов.
+        """
         if self._llm is None:
             from langchain_openai import ChatOpenAI
             self._llm = ChatOpenAI(
@@ -103,12 +118,20 @@ class RAGCore:
         return self._llm
 
     def load_documents(self, directory: Optional[str] = None) -> List[Document]:
-        # Загружаем документы из директории (по умолчанию — config.DATA_DIR)
+        """
+        Загружает документы из указанной директории.
+        По умолчанию — директория config.DATA_DIR.
+        """
         directory = directory or self.config.DATA_DIR
         return load_documents_from_directory(directory)
 
     async def setup_vectorstore(self, documents: List[Document]) -> None:
-        # Подготовка векторного индекса (Milvus)
+        """
+        Индексация документов в Milvus:
+        - нарезка на чанки
+        - генерация эмбеддингов
+        - вставка в Milvus
+        """
         if not documents:
             logger.warning("Нет документов для индексации")
             return
@@ -156,7 +179,11 @@ class RAGCore:
         logger.info("Проиндексировано фрагментов: %d", total)
 
     def create_retriever(self, k: Optional[int] = None, fetch_k: Optional[int] = None) -> None:
-        # Создаём асинхронный ретривер для поиска в Milvus
+        """
+        Создаёт асинхронный ретривер:
+        - ищет документы в Milvus
+        - использует кэширование эмбеддингов запросов
+        """
         k = k or self.config.K
         fetch_k = fetch_k or self.config.FETCH_K
 
@@ -191,10 +218,10 @@ class RAGCore:
 
     def _build_context(self, docs: List[Document], session_id: str) -> str:
         """
-                Формирует финальный контекст для LLM:
-                - учитывает лимит токенов
-                - добавляет историю чата
-                - включает top-k документов срезанных по токенам
+        Формирует контекст для LLM:
+        - учитывает лимит токенов
+        - добавляет историю чата
+        - включает top-k документов
         """
         # Сколько токенов можно занять под документы
         available = self.config.MAX_CONTEXT_TOKENS - self.config.RESERVED_FOR_COMPLETION
@@ -222,11 +249,11 @@ class RAGCore:
 
     def create_qa_generator(self) -> None:
         """
-               Создаёт асинхронный генератор для Q&A:
-               - достаёт документы
-               - строит контекст
-               - стримит ответ LLM
-               - сохраняет историю
+        Создаёт генератор Q&A:
+        - ищет документы
+        - строит контекст
+        - вызывает LLM потоково
+        - сохраняет историю чата
         """
         if not self.retriever:
             raise ValueError("Ретривер не создан. Вызовите create_retriever().")
@@ -237,6 +264,7 @@ class RAGCore:
 
             # Поиск документов
             docs = await self.retriever(question)
+            print(docs)
             if not docs:
                 yield "Информация не найдена."
                 return
