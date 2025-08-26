@@ -15,8 +15,8 @@ class RAGConfig:
     EMBEDDING_BASE_URL: str = os.getenv("RAG_EMBEDDING_BASE_URL", "http://172.20.4.50:8000/v1")
 
     # Milvus
-    MILVUS_URI: str = os.getenv("RAG_MILVUS_URI", "http://10.3.0.5:19530")
-    COLLECTION_NAME: str = os.getenv("RAG_COLLECTION", "demo_ci_rag")
+    MILVUS_URI: str = os.getenv("RAG_MILVUS_URI", "http://172.20.4.50:19530")
+    COLLECTION_NAME: str = os.getenv("RAG_COLLECTION", "centrinform_rag")
     RECREATE_COLLECTION: bool = os.getenv("RAG_RECREATE_COLLECTION", "true").lower() == "true"
     CHECK_DUPLICATES_IN_MILVUS: bool = os.getenv("RAG_CHECK_DUPLICATES", "true").lower() == "true"
 
@@ -32,7 +32,7 @@ class RAGConfig:
 
     # Retrieval
     K: int = int(os.getenv("RAG_K", "7"))
-    FETCH_K: int = int(os.getenv("RAG_FETCH_K", "30"))
+    FETCH_K: int = int(os.getenv("RAG_FETCH_K", "15"))
 
     # Reranker
     RERANKER_BASE_URL: str = os.getenv("RAG_RERANKER_BASE_URL", "http://172.20.4.50:8002/v1/rerank")
@@ -41,3 +41,8 @@ class RAGConfig:
     MAX_CONTEXT_TOKENS: int = int(os.getenv("RAG_MAX_CONTEXT_TOKENS", "8192"))
     RESERVED_FOR_COMPLETION: int = int(os.getenv("RAG_RESERVED_FOR_COMPLETION", "2048"))
     RESERVED_FOR_OVERHEAD: int = int(os.getenv("RAG_RESERVED_FOR_OVERHEAD", "512"))
+
+    # Redis
+    REDIS_HOST: str = os.getenv("RAG_REDIS_HOST", "172.20.4.50")
+    REDIS_PORT: int = int(os.getenv("RAG_REDIS_PORT", "6379"))
+    REDIS_TTL: int = 24 * 3600  # сутки
