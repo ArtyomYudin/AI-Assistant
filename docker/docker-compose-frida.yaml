@@ -2,6 +2,7 @@ services:
   # === LLM Qwen на GPU0 ===
   llm:
     image: nalanzeyu/vllm-gfx906
+    container_name: llm
     command: >
       vllm serve /models/Qwen/Qwen3-8B-AWQ
       --swap-space 8
@@ -38,7 +39,7 @@ services:
     build:
       context: ./frida-embed
       dockerfile: Dockerfile
-    container_name: frida-embeddings
+    container_name: embeddings
     restart: unless-stopped
     devices:
       - /dev/kfd
@@ -65,6 +66,7 @@ services:
   # === BGE Reranker на GPU1 ===
   reranker:
     image: nalanzeyu/vllm-gfx906
+    container_name: reranker
     command: >
       vllm serve /models/BAAI/bge-reranker-v2-m3
       --swap-space 4
@@ -93,3 +95,72 @@ services:
     security_opt:
       - seccomp=unconfined
       - apparmor=unconfined
+
+# === Milvus (Vector DB) ===
+  milvus:
+    image: milvusdb/milvus:v2.6.0
+    container_name: milvus
+    restart: unless-stopped
+    environment:
+      - MILVUS_LOG_LEVEL=info
+      - ETCD_ENDPOINTS=etcd:2379
+      - MINIO_ADDRESS=minio:9000
+      - MQ_TYPE=woodpecker
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    ports:
+      - "19530:19530"   # gRPC
+      - "9091:9091"     # REST
+    volumes:
+      - /storage/milvus:/var/lib/milvus
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9091/healthz" ]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    depends_on:
+      - etcd
+      - minio
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    container_name: milvus-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_RETENTION=1
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    ports:
+      - "2379:2379"
+    volumes:
+      - /storage/etcd:/etcd
+
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    container_name: milvus-minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    command: minio server /data --console-address ":9001"
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9001/minio/health/live" ]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - /storage/minio:/data
+
+  # === Redis (кэш + история чата) ===
+  redis:
+    image: redis:latest
+    container_name: redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - /storage/redis:/data
