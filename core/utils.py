@@ -33,3 +33,23 @@ def clean_md_content(content: str) -> str:
     content = re.sub(r"!\[([^\]]*)\]\([^\)]+\)", "", content)
     content = re.sub(r"\n\s*\n", "\n\n", content)
     return content.strip()
+
+def normalize_score(score: float, ranked_by: str) -> float:
+    """
+    Нормализует score от Milvus или reranker в диапазон [0, 1].
+
+    - milvus/cosine: расстояние (чем меньше, тем ближе) → 1 - dist
+    - milvus/BM25: может быть > 1 → min(score / 10, 1.0)  (эмпирически)
+    - reranker: уже в [0, 1], оставляем как есть
+    """
+    try:
+        if ranked_by == "reranker":
+            return max(0.0, min(1.0, score))  # гарантируем 0–1
+        elif ranked_by == "milvus":
+            # эвристика: если score <= 1 → cosine distance
+            if 0 <= score <= 1:
+                return 1.0 - score
+            # иначе считаем BM25 (обычно десятки)
+            return min(score / 10.0, 1.0)
+    except Exception:
+        return 0.0
