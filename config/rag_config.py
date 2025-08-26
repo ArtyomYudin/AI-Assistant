@@ -11,7 +11,7 @@ class RAGConfig:
     # LLM/Embeddings (OpenAI-compatible)
     LLM_NAME: str = os.getenv("RAG_LLM_NAME", "Qwen3-8B-AWQ")
     LLM_BASE_URL: str = os.getenv("RAG_LLM_BASE_URL", "http://172.20.4.50:8001/v1")
-    EMBEDDING_NAME: str = os.getenv("RAG_EMBEDDING_NAME", "multilingual-e5-large")
+    EMBEDDING_NAME: str = os.getenv("RAG_EMBEDDING_NAME", "ai-forever/FRIDA")
     EMBEDDING_BASE_URL: str = os.getenv("RAG_EMBEDDING_BASE_URL", "http://172.20.4.50:8000/v1")
 
     # Milvus

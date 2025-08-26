@@ -6,37 +6,82 @@ from config.rag_config import RAGConfig
 from core.rag_core import RAGCore
 from core.eval import stream_answer_and_evaluate
 
+# --- Глобальный core (инициализация внутри async) ---
 cfg = RAGConfig()
-core = RAGCore(cfg)
-core.create_retriever(k=cfg.K, fetch_k=cfg.FETCH_K)
-core.create_qa_generator()
+core: RAGCore | None = None
 
+
+# --- Асинхронная инициализация RAG ---
+async def init_rag():
+    global core
+    if core is None:
+        core = RAGCore(cfg)
+        core.create_retriever(k=cfg.K, fetch_k=cfg.FETCH_K)
+        core.create_qa_generator()
+    return core
+
+
+# --- Стриминговый диалог ---
 async def chat_answer_stream(message, history, session_id="gradio"):
-    full_response = ""
-    async for chunk in core.qa_chain_with_history(message, session_id=session_id):
-        full_response += chunk
-        yield full_response
-        # yield chunk
+    rag = await init_rag()
 
+    full_response = ""
+    buffer = ""
+
+    async for chunk in rag.qa_chain_with_history(message, session_id=session_id):
+        buffer += chunk
+        # отдаём партиями, например каждые 10 символов
+        if len(buffer) >= 10:
+            full_response += buffer
+            buffer = ""
+            yield full_response
+
+    if buffer:
+        full_response += buffer
+        yield full_response
+
+
+# --- Стриминговый тест с метриками ---
 async def test_answer_stream(message, keywords_csv, history, session_id="gradio-test"):
+    rag = await init_rag()
+
     expected = [k.strip() for k in (keywords_csv or "").split(",") if k.strip()]
     full_response = ""
-    async for chunk in stream_answer_and_evaluate(core, message, expected, session_id=session_id):
-        if chunk.startswith("\n\n[METRICS]"):
+    buffer = ""
+
+    async for chunk in stream_answer_and_evaluate(rag, message, expected, session_id=session_id):
+        if "[METRICS]" in chunk:
+            parts = chunk.split("[METRICS]", 1)
+            text_part = parts[0]
+            metrics_part = parts[1] if len(parts) > 1 else ""
+
+            if text_part:
+                buffer += text_part
+                full_response += buffer
+                buffer = ""
+
             try:
-                metrics = json.loads(chunk.replace("\n\n[METRICS]",""))
+                metrics = json.loads(metrics_part.strip())
                 pretty = (f"\n\n⏱ {metrics['duration_sec']}s  |  "
                           f"Ключевые слова: {metrics['keywords_found']}/{metrics['keywords_total']}  |  "
                           f"Покрытие: {metrics['coverage_percent']}%\n"
                           f"Детали: {metrics['found_map']}")
-                yield pretty
+                yield full_response + pretty
             except Exception:
-                yield "\n\n[Не удалось распарсить метрики]"
+                yield full_response + "\n\n[Не удалось распарсить метрики]"
         else:
-            full_response += chunk
-            yield full_response
-            # yield chunk
+            buffer += chunk
+            if len(buffer) >= 10:
+                full_response += buffer
+                buffer = ""
+                yield full_response
 
+    if buffer:
+        full_response += buffer
+        yield full_response
+
+
+# --- Интерфейс Gradio ---
 with gr.Blocks(title="RAG — Streaming UI") as demo:
     gr.Markdown("## 🔎 RAG QA (Streaming)")
     with gr.Tab("Диалог"):
@@ -47,6 +92,7 @@ with gr.Blocks(title="RAG — Streaming UI") as demo:
         out = gr.Textbox(label="Стрим ответа + метрики", lines=12)
         btn = gr.Button("Проверить и стримить ответ")
         btn.click(fn=test_answer_stream, inputs=[prompt, keywords, out], outputs=out)
+
 
 if __name__ == "__main__":
     demo.queue().launch()

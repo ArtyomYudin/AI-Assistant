@@ -14,20 +14,20 @@ async def demo_question(core: RAGCore, question: str, session_id: str = "demo") 
         print(token, end="", flush=True)
     print("\n")
 
-def build_and_index(core: RAGCore, data_dir=None) -> None:
+async def build_and_index(core: RAGCore, data_dir=None) -> None:
     docs = core.load_documents(directory=data_dir or core.config.DATA_DIR)
     if not docs:
         logger.warning("Документы не найдены. Добавьте файлы в scraped_data/")
         return
-    core.setup_vectorstore(docs)
+    await core.setup_vectorstore(docs)
 
 async def main():
     cfg = RAGConfig()
     core = RAGCore(cfg)
-    build_and_index(core)
+    await build_and_index(core)
     core.create_retriever(k=cfg.K, fetch_k=cfg.FETCH_K)
     await demo_question(core, "Коротко опиши цели документации из источников.")
-    core.close()
+    await core.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -1,0 +1,96 @@
+services:
+  llm:
+    image: nalanzeyu/vllm-gfx906
+    command: >
+      vllm serve /models/Qwen/Qwen3-8B-AWQ
+      --swap-space 8
+      --disable-log-requests
+      --dtype float16
+      --quantization awq
+      --gpu-memory-utilization=0.92
+      --max-model-len 8192
+      --max-num-batched-tokens 12288
+      --max-num-seqs 16
+      --port 8001
+      --served-model-name Qwen3-8B-AWQ
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    ports:
+      - "8001:8001"
+    volumes:
+      - /storage/models:/models
+    shm_size: "16g"
+    ipc: host
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+
+  embedding:
+    image: nalanzeyu/vllm-gfx906
+    command: >
+      vllm serve /models/intfloat/multilingual-e5-large
+      --swap-space 4
+      --disable-log-requests
+      --dtype float16
+      --gpu-memory-utilization=0.35
+      --task embed
+      --max-num-batched-tokens 2048
+      --max-num-seqs 64
+      --port 8000
+      --served-model-name multilingual-e5-large
+    environment:
+      - CUDA_VISIBLE_DEVICES=1
+    ports:
+      - "8000:8000"
+    volumes:
+      - /storage/models:/models
+    shm_size: "16g"
+    ipc: host
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+
+  reranker:
+    image: nalanzeyu/vllm-gfx906
+    command: >
+      vllm serve /models/BAAI/bge-reranker-v2-m3
+      --swap-space 4
+      --disable-log-requests
+      --dtype float16
+      --gpu-memory-utilization=0.55
+      --max-num-batched-tokens 8192
+      --max-num-seqs 32
+      --port 8002
+      --served-model-name bge-reranker-v2-m3
+    environment:
+      - CUDA_VISIBLE_DEVICES=1
+    ports:
+      - "8002:8002"
+    volumes:
+      - /storage/models:/models
+    shm_size: "16g"
+    ipc: host
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined

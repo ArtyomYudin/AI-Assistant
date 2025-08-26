@@ -10,16 +10,23 @@ logger = logging.getLogger(__name__)
 
 class MilvusManager:
     def __init__(self, uri: str, collection_name: str, recreate: bool = False):
-        from pymilvus import MilvusClient
-        self.client = MilvusClient(uri=uri)
+        from pymilvus import AsyncMilvusClient
+        self.client = AsyncMilvusClient(uri=uri)
         self.collection_name = collection_name
         self._recreate = recreate
 
-    def create_collection_if_needed(self, dense_dim: int) -> None:
-        if self.client.has_collection(self.collection_name):
+    async def close(self) -> None:
+        if hasattr(self.client, "close"):
+            try:
+                await self.client.close()
+            except Exception:
+                pass
+
+    async def create_collection_if_needed(self, dense_dim: int) -> None:
+        if await self.client.has_collection(self.collection_name):
             if self._recreate:
                 logger.info("Удаление существующей коллекции %s", self.collection_name)
-                self.client.drop_collection(self.collection_name)
+                await self.client.drop_collection(self.collection_name)
             else:
                 logger.info("Используется существующая коллекция %s", self.collection_name)
                 return
@@ -43,38 +50,38 @@ class MilvusManager:
         index_params.add_index(field_name="dense_vector", index_type="HNSW", metric_type="COSINE", params={"M": 16, "efConstruction": 200})
         index_params.add_index(field_name="sparse_vector", index_type="SPARSE_INVERTED_INDEX", metric_type="BM25")
 
-        self.client.create_collection(self.collection_name, schema=schema, index_params=index_params)
+        await self.client.create_collection(self.collection_name, schema=schema, index_params=index_params)
         logger.info("Коллекция %s создана (dense_dim=%d)", self.collection_name, dense_dim)
 
-    def is_duplicate_hash(self, h: str) -> bool:
+    async def is_duplicate_hash(self, h: str) -> bool:
         try:
-            res = self.client.query(collection_name=self.collection_name, filter=f"hash == '{h}'", output_fields=["id"], limit=1)
-            return bool(res)
+            res = await self.client.query(collection_name=self.collection_name, filter=f"hash == '{h}'", output_fields=["id"], limit=1)
+            return isinstance(res, list) and len(res) > 0
         except Exception as e:
             logger.warning("Ошибка при проверке дубликата: %s", e)
             return False
 
-    def ensure_not_duplicate_rows(self, rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    async def ensure_not_duplicate_rows(self, rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         unique: List[Dict[str, Any]] = []
         for row in rows:
             h = row.get("hash") or hash_text(row.get("text", ""))
-            if not self.is_duplicate_hash(h):
+            if not await self.is_duplicate_hash(h):
                 row["hash"] = h
                 unique.append(row)
         return unique
 
-    def insert_records(self, rows: List[Dict[str, Any]]) -> int:
+    async def insert_records(self, rows: List[Dict[str, Any]]) -> int:
         if not rows:
             return 0
         try:
-            self.client.insert(self.collection_name, rows)
-            self.client.flush(self.collection_name)
+            await self.client.insert(self.collection_name, rows)
+            await self.client.flush(collection_name=self.collection_name)
             return len(rows)
         except Exception as e:
             logger.exception("Ошибка при вставке батча: %s", e)
             return 0
 
-    def hybrid_search(self, query_text: str, query_dense: List[float], fetch_k: int, top_k: int, reranker_endpoint: str = "") -> List[Document]:
+    async def hybrid_search(self, query_text: str, query_dense: List[float], fetch_k: int, top_k: int, reranker_endpoint: str = "") -> List[Document]:
         try:
             req_dense = AnnSearchRequest(data=[query_dense], anns_field="dense_vector", limit=fetch_k, param={"ef": 100})
             req_sparse = AnnSearchRequest(data=[query_text], anns_field="sparse_vector", limit=fetch_k, param={"drop_ratio_search": 0.2})
@@ -85,13 +92,28 @@ class MilvusManager:
                     "reranker": "model", "provider": "vllm", "queries": [query_text], "endpoint": reranker_endpoint, "maxBatch": 64, "truncate_prompt_tokens": 256
                 })
 
-            results = self.client.hybrid_search(collection_name=self.collection_name, reqs=[req_dense, req_sparse], ranker=ranker, output_fields=["text","source","hash"], limit=top_k)
+            results = await self.client.hybrid_search(
+                collection_name=self.collection_name,
+                reqs=[req_dense, req_sparse],
+                ranker=ranker,
+                output_fields=["text","source","hash"],
+                limit=top_k
+            )
             docs: List[Document] = []
-            if results and results[0]:
-                for res in results[0]:
-                    ent = getattr(res, "entity", None)
+            for hits in results:  # для каждой query
+                for res in hits:
+                    ent = res.get("entity", None) if isinstance(res, dict) else getattr(res, "entity", None)
                     if ent:
-                        docs.append(Document(page_content=ent.get("text",""), metadata={"source": ent.get("source","N/A"), "hash": ent.get("hash",""), "score": getattr(res,"score",0)}))
+                        docs.append(
+                            Document(
+                                page_content=ent.get("text",""),
+                                metadata={
+                                    "source": ent.get("source","N/A"),
+                                    "hash": ent.get("hash",""),
+                                    "score": getattr(res,"score",0)
+                                }
+                            )
+                        )
             return docs
         except Exception as e:
             logger.exception("Ошибка при гибридном поиске: %s", e)
