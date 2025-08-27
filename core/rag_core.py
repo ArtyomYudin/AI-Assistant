@@ -13,19 +13,6 @@ from core.redis_embedding_cache import RedisEmbeddingCache
 
 logger = logging.getLogger(__name__)
 
-QA_PROMPT_TEMPLATE = (
-    "Вы — экспертный ассистент АО «ЦентрИнформ». Отвечайте ТОЛЬКО на основе контекста.\n"
-    "Контекст:\n{context}\n\n"
-    "История диалога:\n{chat_history}\n\n"
-    "Текущий вопрос: {question}\n\n"
-    "Правила:\n"
-    "1. Только на основе контекста.\n"
-    "2. На русском языке.\n"
-    "3. Если нет — 'Информация не найдена'.\n"
-    "4. Без предположений.\n"
-    "Ответ:"
-)
-
 class RAGCore:
     """
       Основной класс, объединяющий все компоненты RAG-пайплайна:
@@ -111,8 +98,9 @@ class RAGCore:
                 model=self.config.LLM_NAME,
                 api_key="EMPTY",
                 base_url=self.config.LLM_BASE_URL,
-                max_tokens=4096,
-                temperature=0.7, streaming=True,
+                max_tokens=self.config.LLM_MAX_TOKEN,
+                temperature=self.config.LLM_TEMPERATURE,
+                streaming=True,
                 extra_body={"chat_template_kwargs": {"enable_thinking": False}}
             )
         return self._llm
@@ -178,6 +166,10 @@ class RAGCore:
             total += await self.milvus.insert_records(unique[i:i+bs])
         logger.info("Проиндексировано фрагментов: %d", total)
 
+        # Загружаем коллекцию в память сразу после вставки
+        await self.milvus.client.load_collection(self.milvus.collection_name)
+        logger.info("Коллекция %s загружена в память", self.milvus.collection_name)
+
     def create_retriever(self, k: Optional[int] = None, fetch_k: Optional[int] = None) -> None:
         """
         Создаёт асинхронный ретривер:
@@ -188,9 +180,17 @@ class RAGCore:
         fetch_k = fetch_k or self.config.FETCH_K
 
         async def retrieve(query: str) -> List[Document]:
-            if not query.strip(): return []
-            if not await self.milvus.client.has_collection(self.milvus.collection_name):
+            if not query.strip():
                 return []
+
+            # Проверяем, что коллекция существует
+            if not await self.milvus.client.has_collection(self.milvus.collection_name):
+                logger.warning("Коллекция %s не найдена", self.milvus.collection_name)
+                return []
+
+            # Подстраховка: загружаем коллекцию перед поиском
+            await self.milvus.client.load_collection(self.milvus.collection_name)
+
             try:
                 # проверка кэша из Redis
                 cached = self.embedding_cache.get(query)
@@ -264,7 +264,6 @@ class RAGCore:
 
             # Поиск документов
             docs = await self.retriever(question)
-            print(docs)
             if not docs:
                 yield "Информация не найдена."
                 return
@@ -280,7 +279,7 @@ class RAGCore:
             history_text = "\n".join(f"{m.type.capitalize()}: {m.content}" for m in hist.messages)
 
             # Финальный промпт
-            prompt = QA_PROMPT_TEMPLATE.format(context=context, chat_history=history_text, question=question)
+            prompt = self.config.QA_PROMPT_TEMPLATE.format(context=context, chat_history=history_text, question=question)
 
             # Добавляем вопрос в историю
             hist.add_user_message(question)
