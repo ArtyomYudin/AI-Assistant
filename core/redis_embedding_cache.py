@@ -8,8 +8,10 @@ class RedisEmbeddingCache:
         self.client = redis.StrictRedis(host=host, port=port, db=db, decode_responses=False)
         self.ttl = ttl  # время жизни ключа в секундах
 
-    def _make_key(self, text: str) -> str:
-        return "emb:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+    @staticmethod
+    def _make_key(text: str) -> str:
+        norm = text.strip().lower()
+        return "emb:" + hashlib.sha256(norm.encode("utf-8")).hexdigest()
 
     def get(self, text: str) -> Optional[List[float]]:
         key = self._make_key(text)
