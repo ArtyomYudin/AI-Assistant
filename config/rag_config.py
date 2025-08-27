@@ -11,6 +11,8 @@ class RAGConfig:
     # LLM/Embeddings (OpenAI-compatible)
     LLM_NAME: str = os.getenv("RAG_LLM_NAME", "Qwen3-8B-AWQ")
     LLM_BASE_URL: str = os.getenv("RAG_LLM_BASE_URL", "http://172.20.4.50:8001/v1")
+    LLM_MAX_TOKEN: int = int(os.getenv("RAG_LLM_MAX_TOKEN", "4096"))
+    LLM_TEMPERATURE: float = float(os.getenv("RAG_LLM_TEMPERATURE", "0.3"))
     EMBEDDING_NAME: str = os.getenv("RAG_EMBEDDING_NAME", "ai-forever/FRIDA")
     EMBEDDING_BASE_URL: str = os.getenv("RAG_EMBEDDING_BASE_URL", "http://172.20.4.50:8000/v1")
 
@@ -32,7 +34,7 @@ class RAGConfig:
 
     # Retrieval
     K: int = int(os.getenv("RAG_K", "7"))
-    FETCH_K: int = int(os.getenv("RAG_FETCH_K", "15"))
+    FETCH_K: int = int(os.getenv("RAG_FETCH_K", "20"))
 
     # Reranker
     RERANKER_BASE_URL: str = os.getenv("RAG_RERANKER_BASE_URL", "http://172.20.4.50:8002/v1/rerank")
@@ -46,3 +48,17 @@ class RAGConfig:
     REDIS_HOST: str = os.getenv("RAG_REDIS_HOST", "172.20.4.50")
     REDIS_PORT: int = int(os.getenv("RAG_REDIS_PORT", "6379"))
     REDIS_TTL: int = 24 * 3600  # сутки
+
+    # Prompt
+    QA_PROMPT_TEMPLATE = (
+        "Вы — экспертный ассистент АО «ЦентрИнформ». Отвечайте ТОЛЬКО на основе контекста.\n"
+        "Контекст:\n{context}\n\n"
+        "История диалога:\n{chat_history}\n\n"
+        "Текущий вопрос: {question}\n\n"
+        "Правила:\n"
+        "1. Только на основе контекста.\n"
+        "2. На русском языке.\n"
+        "3. Если нет — 'Информация не найдена'.\n"
+        "4. Без предположений.\n"
+        "Ответ:"
+    )
