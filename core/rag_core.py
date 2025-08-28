@@ -189,9 +189,7 @@ class RAGCore:
                 return []
 
             # Подстраховка: загружаем коллекцию перед поиском
-            if not await self.milvus.client.is_collection_loaded(self.milvus.collection_name):
-                await self.milvus.client.load_collection(self.milvus.collection_name)
-                logger.info("Коллекция %s загружена", self.milvus.collection_name)
+            await self.milvus.ensure_collection_loaded(self.milvus.collection_name)
 
             try:
                 # проверка кэша из Redis

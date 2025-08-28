@@ -3,6 +3,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from langchain_core.documents import Document
 from pymilvus import AnnSearchRequest, DataType, Function, FunctionType
+from pymilvus.client.types import LoadState
 
 from core.utils import hash_text
 
@@ -88,6 +89,21 @@ class MilvusManager:
 
         await self.client.create_collection(self.collection_name, schema=schema, index_params=index_params)
         logger.info("Коллекция %s создана (dense_dim=%d)", self.collection_name, dense_dim)
+
+    async def ensure_collection_loaded(self, collection_name: str) -> None:
+        """
+        Проверка, загружена ли коллекция в память. Если нет загружаем
+        """
+        try:
+            state_response = await self.client.get_load_state(collection_name)
+            if state_response != LoadState.Loaded:
+                await self.client.load_collection(collection_name)
+                logger.info("Коллекция %s успешно загружена", collection_name)
+            else:
+                logger.info("Коллекция %s уже загружена", collection_name)
+        except Exception as e:
+            logger.error("Ошибка при загрузке коллекции %s: %s", collection_name, str(e))
+
 
     async def is_duplicate_hash(self, h: str) -> bool:
         """
