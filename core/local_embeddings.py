@@ -9,12 +9,12 @@ class LocalEmbeddings(Embeddings):
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self.client = httpx.Client(base_url=self.base_url, timeout=timeout)
+        self.client = httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
 
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        resp = self.client.post(
+        resp = await self.client.post(
             "/embeddings",
             json={"model": self.model, "input": texts},
         )
@@ -22,8 +22,8 @@ class LocalEmbeddings(Embeddings):
         data = resp.json()
         return data["data"]
 
-    def embed_query(self, text: str) -> list[float]:
-        resp = self.client.post(
+    async def embed_query(self, text: str) -> list[float]:
+        resp = await self.client.post(
             "/embeddings",
             json={"model": self.model, "input": [text]},
         )
