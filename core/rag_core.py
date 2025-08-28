@@ -1,10 +1,11 @@
 import logging
-from typing import AsyncGenerator, List, Optional
+from typing import List, Optional
 
 from langchain_core.documents import Document
+from langchain_core.messages import HumanMessage, AIMessage
 
 from config.rag_config import RAGConfig
-from core.chat_history import ChatHistoryManager
+from core.chat_history import RedisChatHistory
 from core.document_loader import load_documents_from_directory
 from core.milvus_manager import MilvusManager
 from core.splitters import SplitterManager
@@ -28,7 +29,13 @@ class RAGCore:
         self.config = config or RAGConfig()
 
         # Менеджер истории диалога (хранит переписку)
-        self.history = ChatHistoryManager(self.config.MAX_HISTORY_MESSAGES)
+        # self.history = ChatHistoryManager(self.config.MAX_HISTORY_MESSAGES)
+        self.history = RedisChatHistory(
+            session_id="default",  # потом можно передавать разный session_id от клиента
+            host=self.config.REDIS_HOST,
+            port=self.config.REDIS_PORT,
+            ttl_days=self.config.HISTORY_TTL_DAYS
+        )
 
         # Подключение к Milvus (векторное хранилище)
         self.milvus = MilvusManager(
@@ -59,6 +66,18 @@ class RAGCore:
             port=self.config.REDIS_PORT,
             ttl=self.config.REDIS_TTL
         )
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+    def __repr__(self):
+        return f"<RAGConfig mode={self.config.MODE}, collection={self.config.COLLECTION_NAME}>"
+
+    def __str__(self):
+        return self.__repr__()
 
     @property
     # def embeddings(self):
@@ -105,6 +124,17 @@ class RAGCore:
             )
         return self._llm
 
+    def get_history(self, session_id: str) -> RedisChatHistory:
+        """
+        Выдаем новый объект под конкретный session_id.
+        """
+        return RedisChatHistory(
+            session_id=session_id,
+            host=self.config.REDIS_HOST,
+            port=self.config.REDIS_PORT,
+            ttl_days=self.config.HISTORY_TTL_DAYS
+        )
+
     def load_documents(self, directory: Optional[str] = None) -> List[Document]:
         """
         Загружает документы из указанной директории.
@@ -138,7 +168,7 @@ class RAGCore:
             # texts = [d.page_content for d in processed]
             # print("DEBUG types:", [type(t) for t in texts[:5]])
             # print("DEBUG sample:", texts[:2])
-            dense_vectors = self.embeddings.embed_documents(texts)
+            dense_vectors = await self.embeddings.embed_documents(texts)
         except Exception as e:
             logger.exception("Ошибка при эмбеддингах: %s", e)
             raise
@@ -170,6 +200,20 @@ class RAGCore:
         await self.milvus.client.load_collection(self.milvus.collection_name)
         logger.info("Коллекция %s загружена в память", self.milvus.collection_name)
 
+    async def _get_embedding_cached(self, query: str) -> Optional[List[float]]:
+        """проверка кэша из Redis"""
+        cached = self.embedding_cache.get(query)
+        if cached is not None:
+            return cached
+        try:
+            # Генерируем эмбеддинг для запроса
+            emb = await self.embeddings.embed_query(query)
+            self.embedding_cache.set(query, emb)
+            return emb
+        except Exception as e:
+            logger.warning("Ошибка эмбеддинга запроса: %s", e)
+            return None
+
     def create_retriever(self, k: Optional[int] = None, fetch_k: Optional[int] = None) -> None:
         """
         Создаёт асинхронный ретривер:
@@ -191,18 +235,7 @@ class RAGCore:
             # Подстраховка: загружаем коллекцию перед поиском
             await self.milvus.ensure_collection_loaded(self.milvus.collection_name)
 
-            try:
-                # проверка кэша из Redis
-                cached = self.embedding_cache.get(query)
-                if cached is not None:
-                    dense = cached
-                else:
-                    # Генерируем эмбеддинг для запроса
-                    dense = self.embeddings.embed_query(query)
-                    self.embedding_cache.set(query, dense)
-            except Exception as e:
-                logger.exception("Ошибка при эмбеддинге запроса: %s", e)
-                return []
+            dense = await self._get_embedding_cached(query)
 
             # Делаем гибридный поиск (по вектору + тексту)
             return await self.milvus.hybrid_search(
@@ -216,22 +249,24 @@ class RAGCore:
         self.retriever = retrieve
         logger.info("Ретривер создан (k=%d, fetch_k=%d)", k, fetch_k)
 
-    def _build_context(self, docs: List[Document], session_id: str) -> str:
+    def _build_context(self, docs: List[Document], session_id: str) -> tuple[str, str]:
         """
-        Формирует контекст для LLM:
-        - учитывает лимит токенов
-        - добавляет историю чата
-        - включает top-k документов
+            Формирует части для LLM:
+            - историю чата
+            - контекст документов
+            - учитывает лимит токенов
+            Возвращает (context, history_text).
         """
         # Сколько токенов можно занять под документы
         available = self.config.MAX_CONTEXT_TOKENS - self.config.RESERVED_FOR_COMPLETION
 
         # История чата
-        hist = self.history.get(session_id)
-        history_text = "\n".join(f"{m.type.capitalize()}: {m.content}" for m in hist.messages)
+        hist = self.get_history(session_id).get_messages()
+        history_text = "\n".join(f"{m.type.capitalize()}: {m.content}" for m in hist)
         available -= count_tokens(history_text) + self.config.RESERVED_FOR_OVERHEAD
         available = max(0, available)
-        if available <= 0: return ""
+        if available <= 0:
+            return "", history_text
 
         # Добавляем документы до исчерпания лимита
         parts, used = [], 0
@@ -245,7 +280,7 @@ class RAGCore:
                 break
             parts.append(text)
             used += tks
-        return "".join(parts).strip()
+        return "".join(parts).strip(), history_text
 
     def create_qa_generator(self) -> None:
         """
@@ -268,21 +303,18 @@ class RAGCore:
                 yield "Информация не найдена."
                 return
 
-            # Формируем контекст для LLM
-            context = self._build_context(docs, session_id)
+            # Формируем контекст и историю
+            context, history_text = self._build_context(docs, session_id)
             if not context:
                 yield "Информация не найдена."
                 return
-
-            # История диалога
-            hist = self.history.get(session_id)
-            history_text = "\n".join(f"{m.type.capitalize()}: {m.content}" for m in hist.messages)
 
             # Финальный промпт
             prompt = self.config.QA_PROMPT_TEMPLATE.format(context=context, chat_history=history_text, question=question)
 
             # Добавляем вопрос в историю
-            hist.add_user_message(question)
+            history = self.get_history(session_id)
+            history.add_message(HumanMessage(content=question))
 
             full = ""
             try:
@@ -293,7 +325,7 @@ class RAGCore:
                         yield content
 
                 # Сохраняем ответ в историю
-                hist.add_ai_message(full)
+                history.add_message(AIMessage(content=full))
             except Exception as e:
                 logger.exception("Ошибка при генерации ответа: %s", e)
                 yield "Произошла ошибка при генерации ответа."
@@ -303,6 +335,4 @@ class RAGCore:
 
     async def close(self) -> None:
         # Корректно закрываем соединение с Milvus
-        if hasattr(self.milvus.client, "close"):
-            try: await self.milvus.client.close()
-            except Exception: pass
+        await self.milvus.close()
