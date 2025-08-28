@@ -10,3 +10,6 @@ uvicorn
 sse-starlette
 gradio
 pydantic
+pydantic-settings
+httpx
+redis
