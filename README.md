@@ -1,133 +1,125 @@
 # RAG Project — Полный набор (Streaming + FastAPI + Gradio + Test Evaluator)
-Включает:
-- Индексация локальных PDF/MD/TXT (папка `scraped_data/` на один уровень выше пакета `project/`)
-- Milvus (Hybrid: Dense + BM25 sparse) + дедупликация по SHA-256
-- Реранк (опционально через vLLM endpoint)
-- QA со стримингом ответа
-- FastAPI (StreamingResponse + SSE)
-- Gradio UI (чат + тестовый вопрос) со стримингом
-- Модуль тест-оценки ответа (покрытие по ключевым словам + метрики)
 
-# Быстрый старт
-1) Установите зависимости:
+## 🚀 Возможности
+- 📂 Индексация локальных PDF / MD / TXT (папка `scraped_data/`)  
+- 🔍 Векторное хранилище **Milvus** (Hybrid: Dense + BM25 sparse)  
+- 🧹 Дедупликация документов по SHA-256  
+- ⚖️ Rerank (опционально через vLLM endpoint)  
+- 💬 Вопрос–ответ с **потоковой генерацией (streaming)**  
+- 🌐 API на **FastAPI** (StreamingResponse + SSE)  
+- 🖥 UI на **Gradio** (чат + тестовый режим)  
+- ✅ Модуль тест-оценки ответа (ключевые слова + метрики)  
+
+---
+
+## ⚡ Архитектура
+```text
+Данные (PDF/MD/TXT) → Чанкование → Embeddings → Milvus (dense + BM25)
+                                                  │
+        ┌─────────────────────────────────────────┘
+        ▼
+Запрос → Embedding → Milvus Hybrid Search → [опц. MMR] → [опц. Reranker] → LLM (vLLM)
+        ▼
+    Ответ (Streaming/SSE) + Логи
+```
+
+---
+
+## 🏁 Быстрый старт
+
+### 1. Установите зависимости
 ```bash
 pip install -r requirements.txt
 ```
 
-2) Подготовьте данные: положите файлы в `scraped_data/`.
+### 2. Подготовьте данные
+Положите файлы в `scraped_data/`.
 
-3) Индексация + демо (CLI):
+### 3. Индексация + демо (CLI)
 ```bash
 python -m main
 ```
 
-4) FastAPI (Swagger: /docs):
+### 4. Запуск FastAPI
 ```bash
 uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
 ```
-- `POST /index` — индексация (читает `scraped_data/`)
-- `POST /ask/stream` — стрим текста
-- `GET /ask/sse?question=...` — SSE (text/event-stream)
-- `POST /test/stream` — стрим ответа + финальные метрики в JSON-маркере
 
-5) Gradio UI:
+Endpoints:
+- `POST /index` — индексация (читает `scraped_data/`)  
+- `POST /ask/stream` — стриминг текста  
+- `GET /ask/sse?question=...` — SSE (text/event-stream)  
+- `POST /test/stream` — ответ + метрики в JSON-маркере  
+
+### 5. Gradio UI
 ```bash
 python -m ui.app
 ```
 
-## Переменные окружения (см. проект/config/rag_config.py)
-- `RAG_LLM_NAME` (default: Qwen3-8B-AWQ)
-- `RAG_LLM_BASE_URL` (OpenAI-compatible, default: http://localhost:8000/v1)
-- `RAG_EMBEDDING_NAME` (default: multilingual-e5-large)
-- `RAG_EMBEDDING_BASE_URL` (default: http://localhost:8000/v1)
-- `RAG_MILVUS_URI` (default: http://localhost:19530)
-- `RAG_COLLECTION` (default: demo_ci_rag)
-- `RAG_RECREATE_COLLECTION` (true/false)
-- `RAG_CHECK_DUPLICATES` (true/false)
-- `RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP`
-- `RAG_K` / `RAG_FETCH_K`
-- `RAG_RERANKER_BASE_URL` (опционально)
-- `RAG_MAX_CONTEXT_TOKENS` (по умолчанию 8192)
-- `RAG_RESERVED_FOR_COMPLETION` (2048)
-- `RAG_RESERVED_FOR_OVERHEAD` (512)
+---
 
-## Заметки
-- Размерность dense-вектора определяется автоматически по первому эмбеддингу — коллекция Milvus будет создана с подходящей размерностью.
-- Для BM25 добавлена функция на поле `text`, генерирующая `sparse_vector`. Вставлять `sparse_vector` вручную не нужно.
-- Дедупликация по `hash` реализована через `query` (точное совпадение), без некорректного ANN-поиска по строковому полю.
+## Переменные окружения
+(см. `config/rag_config.py`)
 
+| Переменная | Описание | Значение по умолчанию |
+|------------|----------|------------------------|
+| `RAG_LLM_NAME` | LLM модель | Qwen3-8B-AWQ |
+| `RAG_LLM_BASE_URL` | OpenAI-compatible endpoint | http://localhost:8000/v1 |
+| `RAG_EMBEDDING_NAME` | embedding модель | multilingual-e5-large |
+| `RAG_EMBEDDING_BASE_URL` | endpoint для embedding | http://localhost:8000/v1 |
+| `RAG_MILVUS_URI` | Milvus URI | http://localhost:19530 |
+| `RAG_COLLECTION` | имя коллекции | demo_ci_rag |
+| `RAG_RECREATE_COLLECTION` | пересоздавать коллекцию | false |
+| `RAG_CHECK_DUPLICATES` | проверка дубликатов | true |
+| `RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP` | параметры чанкования | 512 / 128 |
+| `RAG_K` / `RAG_FETCH_K` | top_k / fetch_k для поиска | 7 / 15 |
+| `RAG_RERANKER_BASE_URL` | endpoint для reranker | (опц.) |
+| `RAG_MAX_CONTEXT_TOKENS` | максимум токенов в контексте | 8192 |
+| `RAG_RESERVED_FOR_COMPLETION` | запас для генерации | 2048 |
+| `RAG_RESERVED_FOR_OVERHEAD` | запас под служебные токены | 512 |
 
-## Host:
-    server IBM x3650 M5, 2х E5-2695 v3, 96GB Ram
-    2x AMD Instinct mi50 16Gb
-    Ubuntu 24.04
-    ROCm 6.3
-    vLLM 0.92
+---
 
-## Docker container GPU1 LLM:
-    docker run -d --rm --device=/dev/kfd --device=/dev/dri --group-add video --shm-size 8G \
-	    --security-opt seccomp=unconfined \
-    	--security-opt apparmor=unconfined \
-    	--cap-add=SYS_PTRACE \
-    	-v /storage/models:/models \
-	    -p 8001:8001 \
-	    --env CUDA_VISIBLE_DEVICES=0 \
-	    nalanzeyu/vllm-gfx906  vllm serve /models/Qwen/Qwen3-8B-AWQ \
-	    --swap-space 8 \
-    	--disable-log-requests \
-    	--dtype float16 \
-        --quantization awq \
-        --gpu-memory-utilization=0.90\
-        --max-model-len 10240 \
-        --max-num-batched-tokens 10240 \
-        --max-seq-len-to-capture 32768 \
-        --max-num-seqs 64 \
-        --port 8001 \
-        --served-model-name Qwen3-8B-AWQ
+## 🖥️ Тестовая инфраструктура
 
-## Docker container GPU2 Embedding:
-    docker run -d --rm --device=/dev/kfd --device=/dev/dri --group-add video --shm-size 8G \
-	    --security-opt seccomp=unconfined \
-    	--security-opt apparmor=unconfined \
-    	--cap-add=SYS_PTRACE \
-    	-v /storage/models:/models \
-	    -p 8000:8000 \
-        --env CUDA_VISIBLE_DEVICES=1 \
-	    nalanzeyu/vllm-gfx906  vllm serve /models/intfloat/multilingual-e5-large \
-	    --swap-space 8 \
-    	--disable-log-requests \
-    	--dtype float16 \
-        --gpu-memory-utilization=0.45\
-		--task embed \
-        --port 8000 \
-        --served-model-name multilingual-e5-large
+**Хост:**  
+```
+IBM x3650 M5, 2× E5-2695 v3, 96GB RAM  
+2× AMD Instinct MI50 (16GB)  
+Ubuntu 24.04 + ROCm 6.3  
+vLLM 0.92
+```
 
-## Docker container GPU2 Reranker:
-    docker run -d --rm --device=/dev/kfd --device=/dev/dri --group-add video --shm-size 8G \
-	    --security-opt seccomp=unconfined \
-    	--security-opt apparmor=unconfined \
-    	--cap-add=SYS_PTRACE \
-    	-v /storage/models:/models \
-	    -p 8002:8002 \
-        --env CUDA_VISIBLE_DEVICES=1 \
-	    nalanzeyu/vllm-gfx906  vllm serve /models/BAAI/bge-reranker-v2-m3 \
-	    --swap-space 8 \
-    	--disable-log-requests \
-    	--dtype float16 \
-        --gpu-memory-utilization=0.45\
-        --port 8002 \
-        --served-model-name bge-reranker-v2-m3
+---
 
-## LLM
-    LLM model:
-        Qwen3-8B-AWQ
-    Embedding model:
-        Qwen3-Embedding-4B - works poorly with Russian.
-        BGE-3m - works poorly with Russian as well.
-        e5-mistral-7b-instruct - gives an error 'Token id 98285 is out of vocabulary', could not be fixed.
-        Giga-Embeddings-instruct - could not be launched on VLLM.
-        multilingual-e5-large - copes better with Russian than the listed ones. Stops at it.
+## 🧠 Используемые модели
 
+**LLM:**
+- Qwen3-8B-AWQ
 
+**Embeddings:**
+- multilingual-e5-large ✅ (лучше работает с русским)  
+- Qwen3-Embedding-4B ❌ плохо с русским  
+- BGE-3m ❌ плохо с русским  
+- e5-mistral-7b-instruct ❌ ошибка `Token id 98285 is out of vocabulary`  
+- Giga-Embeddings-instruct ❌ не запускается на vLLM
 
-In the future, the launch of LLM models will be optimized to improve performance.
+---
+
+## 📌 TODO
+- [ ] Добавить историю чата (Redis)
+- [ ] Добавить кэширование вопросов (Redis)
+- [ ] Добавить Maximal Marginal Relevance (MMR) для диверсификации кандидатов  
+- [ ] Автообновление индекса при изменении данных  
+- [ ] Вынести конфигурацию в `.env`  
+- [ ] Оптимизировать запуск LLM моделей  
+
+---
+
+## 🔎 Пример запроса к embedding API
+```bash
+curl http://localhost:8000/v1/embeddings   -H "Content-Type: application/json"   -d '{
+        "model": "ai-forever/FRIDA",
+        "input": ["Привет мир", "Как дела?"]
+      }'
+```
