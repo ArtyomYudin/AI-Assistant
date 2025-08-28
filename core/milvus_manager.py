@@ -1,8 +1,8 @@
 import logging
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List
 
 from langchain_core.documents import Document
-from pymilvus import AnnSearchRequest, DataType, Function, FunctionType
+from pymilvus import AnnSearchRequest, DataType, Function, FunctionType, MilvusException
 from pymilvus.client.types import LoadState
 
 from core.utils import hash_text
@@ -35,8 +35,11 @@ class MilvusManager:
         if hasattr(self.client, "close"):
             try:
                 await self.client.close()
-            except Exception:
-                pass
+            except (MilvusException, ConnectionError) as e:
+                logger.warning("Ошибка при закрытии Milvus: %s", e)
+            except Exception as e:
+                logger.error("Неожиданная ошибка при закрытии Milvus: %s", e)
+                raise
 
     async def create_collection_if_needed(self, dense_dim: int) -> None:
         """
