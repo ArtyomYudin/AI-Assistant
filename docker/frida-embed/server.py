@@ -27,23 +27,22 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model = T5EncoderModel.from_pretrained(MODEL_NAME)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# --- Определяем оптимальный dtype ---
-if device.type == "cuda":
-    if torch.cuda.is_bf16_supported():
-        dtype = torch.bfloat16
-        logger.info("Загружаем модель в BF16")
-        model = model.to(dtype).to(device)
-    else:
-        dtype = torch.float32
-        logger.info("BF16 не поддерживается, работаем в FP32")
-        model = model.to(dtype).to(device)
-else:
-    dtype = torch.float32
-    logger.info("GPU нет, работаем в FP32")
-    model = model.to(dtype).to(device)
+# # --- Определяем оптимальный dtype ---
+# if device.type == "cuda":
+#     if torch.cuda.is_bf16_supported():
+#         dtype = torch.bfloat16
+#         logger.info("Загружаем модель в BF16")
+#         model = model.to(dtype).to(device)
+#     else:
+#         dtype = torch.float32
+#         logger.info("BF16 не поддерживается, работаем в FP32")
+#         model = model.to(dtype).to(device)
+# else:
+#     dtype = torch.float32
+#     logger.info("GPU нет, работаем в FP32")
+#     model = model.to(dtype).to(device)
 
-model.eval()
-
+model = model.to(device)
 model.eval()
 
 # --- FastAPI ---
