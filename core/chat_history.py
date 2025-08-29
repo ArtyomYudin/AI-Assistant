@@ -1,10 +1,13 @@
 import json
-import hashlib
+import logging
 from typing import List
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.messages import HumanMessage, AIMessage
 import redis
 from datetime import timedelta
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 class RedisChatHistory(BaseChatMessageHistory):
     """
@@ -22,19 +25,20 @@ class RedisChatHistory(BaseChatMessageHistory):
         port: int = 6379,
         db: int = 0,
         ttl_days: int = 7,
+        max_messages: int = 50
     ):
         self.session_id = session_id
         self.redis_client = redis.StrictRedis(
-            host=host,
-            port=port,
-            db=db,
-            decode_responses=True,
-            socket_connect_timeout=5,
-            socket_timeout=5,
+            host = host,
+            port = port,
+            db = db,
+            decode_responses = True,
+            socket_connect_timeout = 5,
+            socket_timeout = 5,
         )
         self.key = f"chat_history:{session_id}"
         self.ttl = timedelta(days=ttl_days)  # TTL в секундах
-        self.max_messages = 100  # ограничение
+        self.max_messages = max_messages  # ограничение
 
     def add_message(self, message):
         """Добавляет сообщение в историю."""
@@ -46,15 +50,17 @@ class RedisChatHistory(BaseChatMessageHistory):
 
         # Сохраняем в Redis
         try:
+            pipe = self.redis_client.pipeline()
             # Добавляем в начало списка
-            self.redis_client.lpush(self.key, json.dumps(msg_data))
+            pipe.lpush(self.key, json.dumps(msg_data))
             # Ограничиваем длину списка
-            self.redis_client.ltrim(self.key, 0, self.max_messages - 1)
+            pipe.ltrim(self.key, 0, self.max_messages - 1)
             # Устанавливаем TTL, если ключа ещё нет
             if self.redis_client.ttl(self.key) == -1:  # ключ не имеет TTL
-                self.redis_client.expire(self.key, int(self.ttl.total_seconds()))
+                pipe.expire(self.key, int(self.ttl.total_seconds()))
+            pipe.execute()
         except Exception as e:
-            print(f"Ошибка при сохранении сообщения в Redis: {e}")
+            logger.warning("Ошибка при сохранении сообщения в Redis: %s", e)
 
     def get_messages(self) -> List:
         """Возвращает список сообщений (в обратном порядке)."""
@@ -67,10 +73,10 @@ class RedisChatHistory(BaseChatMessageHistory):
                     cls = HumanMessage if data["type"] == "human" else AIMessage
                     messages.append(cls(content=data["content"]))
                 except Exception as e:
-                    print(f"Ошибка при разборе сообщения: {e}")
+                    logger.warning("Ошибка при разборе сообщения: %s",e)
             return messages
         except Exception as e:
-            print(f"Ошибка при чтении истории из Redis: {e}")
+            logger.warning("Ошибка при чтении истории из Redis: %s", e)
             return []
 
     def clear(self):
