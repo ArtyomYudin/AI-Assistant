@@ -6,13 +6,13 @@ class RAGConfig(BaseSettings):
     # Общие
     PROJECT_ROOT: Path = Path(__file__).parent.parent.resolve()
     DATA_DIR: str = "scraped_data"
-    MODE: str = "rag"  # rag, llm_only, hybrid
+    MODE: str = "hybrid"  # rag, llm_only, hybrid
 
     # LLM / Embedding
     LLM_NAME: str = "Qwen3-8B-AWQ"
     LLM_BASE_URL: str = "http://172.20.4.50:8001/v1"
     LLM_MAX_TOKEN: int = 4096
-    LLM_TEMPERATURE: float = 0.3
+    LLM_TEMPERATURE: float = 0.1
     EMBEDDING_NAME: str = "ai-forever/FRIDA"
     EMBEDDING_BASE_URL: str = "http://172.20.4.50:8000/v1"
 
@@ -91,7 +91,7 @@ class RAGConfig(BaseSettings):
         "Ответ:"
     )
     QA_PROMPT_HYBRID_EN: str = (
-        "You are an assistant for АО ЦентрИнформ.\n"
+        "You are an expert assistant in the ИТО department. Your name is Nicole.\n"
         "Use the provided documents if available. "
         "If the documents are insufficient — supplement the answer with your own knowledge "
         "(mark such parts as [по памяти]).\n\n"
