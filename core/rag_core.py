@@ -10,8 +10,9 @@ from core.document_loader import load_documents_from_directory
 from core.milvus_manager import MilvusManager
 from core.splitters import SplitterManager
 from core.utils import count_tokens, truncate_text_by_tokens
-from core.redis_embedding_cache import RedisEmbeddingCache
+from core.embedding_cache import RedisEmbeddingCache
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 class RAGCore:
@@ -29,19 +30,19 @@ class RAGCore:
         self.config = config or RAGConfig()
 
         # Менеджер истории диалога (хранит переписку)
-        # self.history = ChatHistoryManager(self.config.MAX_HISTORY_MESSAGES)
         self.history = RedisChatHistory(
-            session_id="default",  # потом можно передавать разный session_id от клиента
-            host=self.config.REDIS_HOST,
-            port=self.config.REDIS_PORT,
-            ttl_days=self.config.HISTORY_TTL_DAYS
+            session_id = "default",  # потом можно передавать разный session_id от клиента
+            host = self.config.REDIS_HOST,
+            port = self.config.REDIS_PORT,
+            ttl_days = self.config.HISTORY_TTL_DAYS,
+            max_messages = self.config.MAX_HISTORY_MESSAGES
         )
 
         # Подключение к Milvus (векторное хранилище)
         self.milvus = MilvusManager(
-            uri=self.config.MILVUS_URI,
-            collection_name=self.config.COLLECTION_NAME,
-            recreate=self.config.RECREATE_COLLECTION
+            uri = self.config.MILVUS_URI,
+            collection_name = self.config.COLLECTION_NAME,
+            recreate = self.config.RECREATE_COLLECTION
         )
 
         # Управление сплиттингом текста (по заголовкам, чанкам)
@@ -62,9 +63,9 @@ class RAGCore:
 
         # Кэш эмбеддингов запросов в Redis
         self.embedding_cache = RedisEmbeddingCache(
-            host=self.config.REDIS_HOST,
-            port=self.config.REDIS_PORT,
-            ttl=self.config.REDIS_TTL
+            host = self.config.REDIS_HOST,
+            port = self.config.REDIS_PORT,
+            ttl = self.config.REDIS_TTL
         )
 
     async def __aenter__(self):
@@ -99,9 +100,9 @@ class RAGCore:
         if self._embeddings is None:
             from core.local_embeddings import LocalEmbeddings
             self._embeddings = LocalEmbeddings(
-                model=self.config.EMBEDDING_NAME,
-                base_url=self.config.EMBEDDING_BASE_URL,
-                timeout=60,
+                model = self.config.EMBEDDING_NAME,
+                base_url = self.config.EMBEDDING_BASE_URL,
+                timeout = 60,
             )
         return self._embeddings
 
@@ -114,13 +115,13 @@ class RAGCore:
         if self._llm is None:
             from langchain_openai import ChatOpenAI
             self._llm = ChatOpenAI(
-                model=self.config.LLM_NAME,
-                api_key="EMPTY",
-                base_url=self.config.LLM_BASE_URL,
-                max_tokens=self.config.LLM_MAX_TOKEN,
-                temperature=self.config.LLM_TEMPERATURE,
-                streaming=True,
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}}
+                model = self.config.LLM_NAME,
+                api_key = "EMPTY",
+                base_url =self.config.LLM_BASE_URL,
+                max_tokens = self.config.LLM_MAX_TOKEN,
+                temperature = self.config.LLM_TEMPERATURE,
+                streaming = True,
+                extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
             )
         return self._llm
 
@@ -129,10 +130,10 @@ class RAGCore:
         Выдаем новый объект под конкретный session_id.
         """
         return RedisChatHistory(
-            session_id=session_id,
-            host=self.config.REDIS_HOST,
-            port=self.config.REDIS_PORT,
-            ttl_days=self.config.HISTORY_TTL_DAYS
+            session_id = session_id,
+            host = self.config.REDIS_HOST,
+            port = self.config.REDIS_PORT,
+            ttl_days = self.config.HISTORY_TTL_DAYS
         )
 
     def load_documents(self, directory: Optional[str] = None) -> List[Document]:
@@ -165,9 +166,6 @@ class RAGCore:
 
         # Генерация эмбеддингов для каждого чанка
         try:
-            # texts = [d.page_content for d in processed]
-            # print("DEBUG types:", [type(t) for t in texts[:5]])
-            # print("DEBUG sample:", texts[:2])
             dense_vectors = await self.embeddings.embed_documents(texts)
         except Exception as e:
             logger.exception("Ошибка при эмбеддингах: %s", e)
@@ -181,7 +179,11 @@ class RAGCore:
         await self.milvus.create_collection_if_needed(dense_dim=dense_dim)
 
         # Подготавливаем данные для вставки
-        rows = [{"text": t, "source": s, "hash": h or "", "dense_vector": dv} for t, s, dv, h in zip(texts, sources, dense_vectors, hashes)]
+        rows = [
+            {"text": t,
+             "source": s,
+             "hash": h or "",
+             "dense_vector": dv} for t, s, dv, h in zip(texts, sources, dense_vectors, hashes)]
 
         # Убираем дубликаты
         unique = await self.milvus.ensure_not_duplicate_rows(rows)
@@ -239,11 +241,11 @@ class RAGCore:
 
             # Делаем гибридный поиск (по вектору + тексту)
             return await self.milvus.hybrid_search(
-                query_text=query,
-                query_dense=dense,
-                fetch_k=fetch_k,
-                top_k=k,
-                reranker_endpoint=self.config.RERANKER_BASE_URL
+                query_text = query,
+                query_dense = dense,
+                fetch_k = fetch_k,
+                top_k = k,
+                reranker_endpoint = self.config.RERANKER_BASE_URL
             )
 
         self.retriever = retrieve
@@ -282,6 +284,19 @@ class RAGCore:
             used += tks
         return "".join(parts).strip(), history_text
 
+    def _build_prompt(self, mode: str, question: str, context: str, history_text: str) -> str:
+        """
+        конструктор промптов в зависимости от режима работы RAG
+        """
+        if mode == "rag":
+            return self.config.QA_PROMPT_RAG_EN.format(context=context, chat_history=history_text, question=question)
+        elif mode == "hybrid":
+            return self.config.QA_PROMPT_HYBRID_EN.format(context=context, chat_history=history_text, question=question)
+        elif mode == "llm_only":
+            return self.config.QA_PROMPT_LLM_ONLY_EN.format(chat_history=history_text, question=question)
+        else:
+            raise ValueError(f"Неизвестный режим: {mode}")
+
     def create_qa_generator(self) -> None:
         """
         Создаёт генератор Q&A:
@@ -310,11 +325,10 @@ class RAGCore:
                 return
 
             # Финальный промпт
-            prompt = self.config.QA_PROMPT_TEMPLATE.format(context=context, chat_history=history_text, question=question)
-
-            # Добавляем вопрос в историю
-            history = self.get_history(session_id)
-            history.add_message(HumanMessage(content=question))
+            prompt = self._build_prompt(mode = self.config.MODE,
+                                        question = question,
+                                        context = context,
+                                        history_text = history_text)
 
             full = ""
             try:
@@ -324,6 +338,9 @@ class RAGCore:
                         full += content
                         yield content
 
+                # Добавляем вопрос в историю
+                history = self.get_history(session_id)
+                history.add_message(HumanMessage(content=question))
                 # Сохраняем ответ в историю
                 history.add_message(AIMessage(content=full))
             except Exception as e:
