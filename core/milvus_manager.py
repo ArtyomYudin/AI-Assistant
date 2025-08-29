@@ -7,6 +7,7 @@ from pymilvus.client.types import LoadState
 
 from core.utils import hash_text
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 class MilvusManager:
@@ -71,26 +72,27 @@ class MilvusManager:
 
         # Добавляем BM25 для sparse-вектора
         schema.add_function(Function(
-            name="text_bm25_emb",
-            input_field_names=["text"],
-            output_field_names=["sparse_vector"],
-            function_type=FunctionType.BM25,
+            name = "text_bm25_emb",
+            input_field_names = ["text"],
+            output_field_names = ["sparse_vector"],
+            function_type = FunctionType.BM25,
         ))
 
         # Индексы
         index_params = self.client.prepare_index_params()
         index_params.add_index(
-            field_name="dense_vector",
-            index_type="HNSW", metric_type="COSINE",
-            params={"M": 16, "efConstruction": 200}
+            field_name = "dense_vector",
+            index_type = "HNSW",
+            metric_type = "COSINE",
+            params = {"M": 16, "efConstruction": 200}
         )
         index_params.add_index(
-            field_name="sparse_vector",
-            index_type="SPARSE_INVERTED_INDEX",
-            metric_type="BM25"
+            field_name = "sparse_vector",
+            index_type = "SPARSE_INVERTED_INDEX",
+            metric_type = "BM25"
         )
 
-        await self.client.create_collection(self.collection_name, schema=schema, index_params=index_params)
+        await self.client.create_collection(self.collection_name, schema = schema, index_params = index_params)
         logger.info("Коллекция %s создана (dense_dim=%d)", self.collection_name, dense_dim)
 
     async def ensure_collection_loaded(self, collection_name: str) -> None:
@@ -116,10 +118,10 @@ class MilvusManager:
         """
         try:
             res = await self.client.query(
-                collection_name=self.collection_name,
-                filter=f"hash == '{h}'",
-                output_fields=["id"],
-                limit=1
+                collection_name = self.collection_name,
+                filter = f"hash == '{h}'",
+                output_fields = ["id"],
+                limit = 1
             )
             return isinstance(res, list) and len(res) > 0
         except Exception as e:
@@ -175,28 +177,28 @@ class MilvusManager:
         try:
             # Поиск по dense-вектору
             req_dense = AnnSearchRequest(
-                data=[query_dense],
-                anns_field="dense_vector",
-                limit=fetch_k,
-                param={"ef": 100}
+                data = [query_dense],
+                anns_field = "dense_vector",
+                limit = fetch_k,
+                param = {"ef": 100}
             )
 
             # Поиск по sparse-вектору (BM25)
             req_sparse = AnnSearchRequest(
-                data=[query_text],
-                anns_field="sparse_vector",
-                limit=fetch_k,
-                param={"drop_ratio_search": 0.2}
+                data = [query_text],
+                anns_field = "sparse_vector",
+                limit = fetch_k,
+                param = {"drop_ratio_search": 0.2}
             )
 
             # Подключаем reranker, если указан endpoint
             ranker = None
             if reranker_endpoint:
                 ranker = Function(
-                    name="vllm_semantic_ranker",
-                    input_field_names=["text"],
-                    function_type=FunctionType.RERANK,
-                    params={
+                    name = "vllm_semantic_ranker",
+                    input_field_names = ["text"],
+                    function_type = FunctionType.RERANK,
+                    params = {
                         "reranker": "model",
                         "provider": "vllm",
                         "queries": [query_text],
@@ -208,11 +210,11 @@ class MilvusManager:
 
             # Выполняем гибридный поиск
             results = await self.client.hybrid_search(
-                collection_name=self.collection_name,
-                reqs=[req_dense, req_sparse],
-                ranker=ranker,
-                output_fields=["text","source","hash"],
-                limit=top_k
+                collection_name = self.collection_name,
+                reqs = [req_dense, req_sparse],
+                ranker = ranker,
+                output_fields = ["text","source","hash"],
+                limit = top_k
             )
 
             # Преобразуем результаты в LangChain Document
@@ -223,8 +225,8 @@ class MilvusManager:
                     if ent:
                         docs.append(
                             Document(
-                                page_content=ent.get("text",""),
-                                metadata={
+                                page_content = ent.get("text",""),
+                                metadata = {
                                     "source": ent.get("source","N/A"),
                                     "hash": ent.get("hash",""),
                                     "score": getattr(res,"score",0)
