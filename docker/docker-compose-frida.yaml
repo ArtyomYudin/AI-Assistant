@@ -5,14 +5,12 @@ services:
     container_name: llm
     command: >
       vllm serve /models/Qwen/Qwen3-8B-AWQ
-      --swap-space 8
-      --disable-log-requests
-      --dtype float16
-      --quantization awq
-      --gpu-memory-utilization=0.92
-      --max-model-len 8192
-      --max-num-batched-tokens 12288
+      --gpu-memory-utilization 0.85
+      --max-model-len 16384
+      --max-num-batched-tokens 16384
       --max-num-seqs 16
+      --enable-prefix-caching
+      --disable-log-requests
       --port 8001
       --served-model-name Qwen3-8B-AWQ
     environment:
