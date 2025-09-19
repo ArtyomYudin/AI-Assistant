@@ -36,7 +36,7 @@ async def health():
 @app.post("/index")
 async def index_all():
     docs = core.load_documents(cfg.DATA_DIR)
-    core.setup_vectorstore(docs)
+    await core.setup_vectorstore(docs)
     return {"status": "indexed"}
 
 @app.post("/ask/stream")

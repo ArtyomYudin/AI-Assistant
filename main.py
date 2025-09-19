@@ -26,7 +26,7 @@ async def main():
     core = RAGCore(cfg)
     await build_and_index(core)
     core.create_retriever(k=cfg.K, fetch_k=cfg.FETCH_K)
-    await demo_question(core, "Коротко опиши цели документации из источников.")
+    await demo_question(core, "кто директор?")
     await core.close()
 
 if __name__ == "__main__":

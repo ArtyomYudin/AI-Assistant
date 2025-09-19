@@ -13,3 +13,4 @@ pydantic
 pydantic-settings
 httpx
 redis
+docling
