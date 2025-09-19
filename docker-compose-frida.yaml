@@ -35,7 +35,7 @@ services:
   # === FRIDA Embeddings на GPU1 ===
   frida-embeddings:
     build:
-      context: docker/frida-embed
+      context: .
       dockerfile: docker/frida-embed/Dockerfile
     container_name: embeddings
     restart: unless-stopped
