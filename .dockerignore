@@ -1,0 +1,36 @@
+# Исключаем виртуальные окружения
+venv/
+.venv
+#.env.example
+#.env.example.*
+
+# Исключаем system/IDE файлы
+*.pyc
+*.pyo
+__pycache__/
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# Исключаем директории IDE
+.vscode/
+.idea/
+
+# Исключаем Git-репозиторий и прочее
+.git
+.gitignore
+.dockerignore
+
+# Исключаем логи
+*.log
+logs/
+*.out
+
+# Исключаем артефакты
+*.zip
+*.tar
+*.tar.gz
+*.egg-info/
+dist/
+build/
