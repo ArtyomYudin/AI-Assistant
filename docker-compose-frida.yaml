@@ -166,7 +166,7 @@ services:
   # RAG FastAPI
   rag-api:
     build:
-      context: docker
+      context: .
       dockerfile: docker/Dockerfile
     container_name: rag-api
     restart: unless-stopped
