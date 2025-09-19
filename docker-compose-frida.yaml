@@ -35,8 +35,8 @@ services:
   # === FRIDA Embeddings на GPU1 ===
   frida-embeddings:
     build:
-      context: ./frida-embed
-      dockerfile: Dockerfile
+      context: docker/frida-embed
+      dockerfile: docker/frida-embed/Dockerfile
     container_name: embeddings
     restart: unless-stopped
     devices:
@@ -162,3 +162,18 @@ services:
       - "6379:6379"
     volumes:
       - /storage/redis:/data
+
+  # RAG FastAPI
+  rag-api:
+    build:
+      context: docker
+      dockerfile: docker/Dockerfile
+    container_name: rag-api
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "8008:8008"
+    command: >
+      uvicorn api.app:app --host 0.0.0.0 --port 8008
+
