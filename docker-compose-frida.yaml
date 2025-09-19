@@ -35,8 +35,8 @@ services:
   # === FRIDA Embeddings на GPU1 ===
   frida-embeddings:
     build:
-      context: .
-      dockerfile: docker/frida-embed/Dockerfile
+      context: ./docker/frida-embed
+      dockerfile: Dockerfile
     container_name: embeddings
     restart: unless-stopped
     devices:
@@ -166,8 +166,8 @@ services:
   # RAG FastAPI
   rag-api:
     build:
-      context: .
-      dockerfile: docker/Dockerfile
+      context: ./docker
+      dockerfile: Dockerfile
     container_name: rag-api
     restart: unless-stopped
     environment:
