@@ -54,7 +54,13 @@ async def ask_stream(req: AskRequest):
         async for chunk in core.qa_chain_with_history(req.question, session_id=req.session_id or "api"):
             yield chunk
     # return StreamingResponse(generator(), media_type="text/plain; charset=utf-8")
-    return StreamingResponse(generator(), media_type="text/event-stream")
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",  # важно для nginx
+        "Content-Type": "text/event-stream; charset=utf-8",
+    }
+    return StreamingResponse(generator(), headers=headers)
 
 @app.get("/ask/sse")
 async def ask_sse(question: str = Query(...), session_id: str = Query("api-sse")):

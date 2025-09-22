@@ -358,13 +358,23 @@ class RAGCore:
             )
 
             full = ""
+            buffer = ""
             try:
                 async for chunk in self.llm.astream([{"role": "user", "content": prompt}]):
                     if content := chunk.content:
                         if not full:  # первый токен — сразу отдаем
                             yield "🧠 Генерирую ответ...\n"
                         full += content
-                        yield content
+                        # yield content
+
+                        # Отправляем, только если накопилось достаточно или встретили знак препинания
+                        if len(buffer) > 50 or content in ".!?\n":
+                            yield buffer
+                            buffer = ""
+
+                # Скидываем остаток
+                if buffer:
+                    yield buffer
 
                 # Сохраняем в историю
                 history = self.get_history(session_id)
