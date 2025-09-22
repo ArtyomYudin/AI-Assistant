@@ -7,6 +7,7 @@ from fastapi import FastAPI, Body, Query
 from fastapi.responses import StreamingResponse, JSONResponse
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel, Field
+from starlette.middleware.cors import CORSMiddleware
 
 from config.rag_config import RAGConfig
 from core.rag_core import RAGCore
@@ -28,6 +29,14 @@ class TestRequest(BaseModel):
     question: str
     expected_keywords: List[str] = Field(default_factory=list)
     session_id: Optional[str] = "test"
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # или ["http://localhost:4200"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/health")
 async def health():
