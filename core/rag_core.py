@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import time
 from typing import List, Optional
 
 from langchain_core.documents import Document
@@ -312,43 +314,63 @@ class RAGCore:
                 yield "Пожалуйста, задайте вопрос."
                 return
 
-            # моментальный отклик
+                # Сразу отдаём первый токен — "отклик"
             yield "⏳ Думаю над вашим вопросом...\n"
 
-            # Поиск документов
+            # Запускаем асинхронно генерацию эмбеддинга и загрузку истории
+            embedding_task = asyncio.create_task(self._get_embedding_cached(question))
+            history_task = asyncio.create_task(
+                asyncio.to_thread(self.get_history(session_id).get_messages)
+            )
+
+            # Пока ждём эмбеддинг — можно начать формировать часть промпта без контекста
             yield "📚 Ищу документы...\n"
-            docs = await self.retriever(question)
+
+            # Ждём эмбеддинг
+            dense = await embedding_task
+            if not dense:
+                yield "Ошибка при обработке запроса."
+                return
+
+            # Поиск документов (можно тоже обернуть в таск, если хочешь параллелить с чем-то ещё)
+            docs = await self.retriever(question)  # внутри уже использует кэш и гибридный поиск
             if not docs:
                 yield "Информация не найдена."
                 return
 
             yield "✅ Документы найдены. Формирую ответ...\n"
 
-            # Формируем контекст и историю
-            context, history_text = self._build_context(docs, session_id)
+            # Ждём историю
+            hist = await history_task
+            history_text = "\n".join(f"{m.type.capitalize()}: {m.content}" for m in hist)
+
+            # Формируем контекст
+            context, _ = self._build_context(docs, session_id)  # передаём уже готовую историю
             if not context:
                 yield "Информация не найдена."
                 return
 
-            # Финальный промпт
-            prompt = self._build_prompt(mode = self.config.MODE,
-                                        question = question,
-                                        context = context,
-                                        history_text = history_text)
+            prompt = self._build_prompt(
+                mode=self.config.MODE,
+                question=question,
+                context=context,
+                history_text=history_text
+            )
 
             full = ""
             try:
-                # Потоковый вызов LLM
-                async for chunk in self.llm.astream([{ "role": "user", "content": prompt }]):
+                async for chunk in self.llm.astream([{"role": "user", "content": prompt}]):
                     if content := chunk.content:
+                        if not full:  # первый токен — сразу отдаем
+                            yield "🧠 Генерирую ответ...\n"
                         full += content
                         yield content
 
-                # Добавляем вопрос в историю
+                # Сохраняем в историю
                 history = self.get_history(session_id)
                 history.add_message(HumanMessage(content=question))
-                # Сохраняем ответ в историю
                 history.add_message(AIMessage(content=full))
+
             except Exception as e:
                 logger.exception("Ошибка при генерации ответа: %s", e)
                 yield "Произошла ошибка при генерации ответа."
