@@ -177,3 +177,17 @@ services:
     command: >
       uvicorn api.app:app --host 0.0.0.0 --port 8008
 
+  # Gradio UI
+  rag-gradio:
+      build:
+        context: .
+        dockerfile: docker/Dockerfile  # можно использовать тот же Dockerfile
+      container_name: rag-gradio
+      restart: unless-stopped
+      environment:
+        - PYTHONUNBUFFERED=1
+      ports:
+        - "7860:7860"  # Gradio по умолчанию слушает 7860
+      command: python ui/app.py  # 👈 запуск Gradio-приложения
+      depends_on:
+        - rag-api
