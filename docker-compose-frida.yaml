@@ -98,7 +98,7 @@ services:
 
 # === Milvus (Vector DB) ===
   milvus:
-    image: milvusdb/milvus:v2.6.0
+    image: milvusdb/milvus:v2.6.2
     container_name: milvus
     restart: unless-stopped
     environment:
