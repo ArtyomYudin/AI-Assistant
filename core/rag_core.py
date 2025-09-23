@@ -255,26 +255,39 @@ class RAGCore:
     def _build_context(self, docs: List[Document], session_id: str) -> tuple[str, str]:
         """
             Формирует части для LLM:
-            - историю чата
-            - контекст документов
+            - историю чата (обрезает слишком длинные сообщения)
+            - контекст документов (с учётом лимита токенов)
             - учитывает лимит токенов
             Возвращает (context, history_text).
         """
-        # Сколько токенов можно занять под документы
-        available = self.config.MAX_CONTEXT_TOKENS - self.config.RESERVED_FOR_COMPLETION
+        # История чата — берём последние MAX_HISTORY_MESSAGES сообщений
+        history_obj = self.get_history(session_id)
+        hist = history_obj.get_messages()
+        hist = hist[-self.config.MAX_HISTORY_MESSAGES:]  # последние N сообщений
+        # Обрезаем каждое сообщение до разумного количества токенов, например 500
+        history_text = "\n".join(
+            f"{m.type.capitalize()}: {truncate_text_by_tokens(m.content, 500)}" for m in hist
+        )
 
-        # История чата
-        hist = self.get_history(session_id).get_messages()
-        history_text = "\n".join(f"{m.type.capitalize()}: {m.content}" for m in hist)
-        available -= count_tokens(history_text) + self.config.RESERVED_FOR_OVERHEAD
-        available = max(0, available)
+        # Считаем доступные токены для документов
+        available = self.config.MAX_CONTEXT_TOKENS - self.config.RESERVED_FOR_COMPLETION \
+                    - count_tokens(history_text) - self.config.RESERVED_FOR_OVERHEAD
         if available <= 0:
-            return "", history_text
+            logger.warning(
+                f"[{session_id}] Доступные токены для документов <= 0 ({available}). "
+                f"Добавляем хотя бы первый документ в контекст."
+            )
+            # fallback: добавляем первый документ
+            if docs:
+                text = f"[Источник: {docs[0].metadata.get('source', 'N/A')}] {docs[0].page_content.strip()}"
+                return truncate_text_by_tokens(text, 500), history_text
+            else:
+                return "", history_text
 
-        # Добавляем документы до исчерпания лимита
+        # Добавляем документы до исчерпания лимита токенов
         parts, used = [], 0
         for d in sorted(docs, key=lambda x: x.metadata.get("score", 0), reverse=True):
-            text = f"[Источник: {d.metadata.get('source','N/A')}] {d.page_content.strip()}\n"
+            text = f"[Источник: {d.metadata.get('source', 'N/A')}] {d.page_content.strip()}\n"
             tks = count_tokens(text)
             if used + tks > available:
                 remain = available - used
@@ -283,7 +296,14 @@ class RAGCore:
                 break
             parts.append(text)
             used += tks
-        return "".join(parts).strip(), history_text
+
+        context = "".join(parts).strip()
+
+        # Если контекст всё ещё пустой (например документы очень длинные), добавляем первый документ частично
+        if not context and docs:
+            context = truncate_text_by_tokens(docs[0].page_content.strip(), min(available, 500))
+
+        return context, history_text
 
     def _build_prompt(self, mode: str, question: str, context: str, history_text: str) -> str:
         """
