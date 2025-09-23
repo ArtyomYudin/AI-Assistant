@@ -13,6 +13,12 @@ from starlette.middleware.cors import CORSMiddleware
 from config.rag_config import RAGConfig
 from core.rag_core import RAGCore
 
+# Настраиваем логирование приложения
+logging.basicConfig(
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
+    format="%(asctime)s | %(levelname)-8s | %(name)s: %(message)s",
+    handlers=[logging.StreamHandler()]
+)
 logger = logging.getLogger(__name__)
 
 cfg = RAGConfig()
