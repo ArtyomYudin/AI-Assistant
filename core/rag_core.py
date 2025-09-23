@@ -454,8 +454,8 @@ class RAGCore:
             total_time = time.time() - start_time
             logger.debug(f"[{session_id}] 🎯 Полное время обработки: {total_time:.2f} сек")
 
-            self.qa_chain_with_history = generate_answer_stream
-            logger.info("QA-генератор со стримингом и историей настроен")
+        self.qa_chain_with_history = generate_answer_stream
+        logger.info("QA-генератор со стримингом и историей настроен")
 
     async def close(self) -> None:
         # Корректно закрываем соединение с Milvus
