@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
         await core.close()
         logger.info("🔌 RAGCore закрыт")
 
-app = FastAPI(title="RAG API (Streaming)", version="1.0.0")
+app = FastAPI(title="RAG API (Streaming)", version="1.0.0", lifespan=lifespan)
 
 
 class AskRequest(BaseModel):
