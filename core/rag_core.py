@@ -310,7 +310,11 @@ class RAGCore:
         if not self.retriever:
             raise ValueError("Ретривер не создан. Вызовите create_retriever().")
         async def generate_answer_stream(question: str, session_id: str = "default"):
+            start_time = time.time()
+            logger.debug(f"[{session_id}] 🚀 Начал обработку вопроса: {question[:100]}...")
+
             if not question.strip():
+                logger.warning(f"[{session_id}] Получен пустой вопрос")
                 yield "Пожалуйста, задайте вопрос."
                 return
 
@@ -318,38 +322,80 @@ class RAGCore:
             yield "⏳ Думаю над вашим вопросом...\n"
 
             # Запускаем асинхронно генерацию эмбеддинга и загрузку истории
+            embedding_start = time.time()
             embedding_task = asyncio.create_task(self._get_embedding_cached(question))
             history_task = asyncio.create_task(
                 asyncio.to_thread(self.get_history(session_id).get_messages)
             )
+            logger.debug(f"[{session_id}] Запустил параллельные задачи: эмбеддинг + история")
 
             # Пока ждём эмбеддинг — можно начать формировать часть промпта без контекста
             yield "📚 Ищу документы...\n"
 
             # Ждём эмбеддинг
-            dense = await embedding_task
+            try:
+                dense = await embedding_task
+                embedding_time = time.time() - embedding_start
+                logger.debug(f"[{session_id}] ✅ Эмбеддинг получен за {embedding_time:.2f} сек")
+            except Exception as e:
+                logger.exception(f"[{session_id}] ❌ Ошибка при получении эмбеддинга: {e}")
+                yield "Ошибка при обработке запроса."
+                return
+
             if not dense:
+                logger.warning(f"[{session_id}] Эмбеддинг пустой или None")
                 yield "Ошибка при обработке запроса."
                 return
 
             # Поиск документов (можно тоже обернуть в таск, если хочешь параллелить с чем-то ещё)
-            docs = await self.retriever(question)  # внутри уже использует кэш и гибридный поиск
+            search_start = time.time()
+            try:
+                docs = await self.retriever(question)
+                search_time = time.time() - search_start
+                logger.debug(f"[{session_id}] ✅ Найдено {len(docs)} документов за {search_time:.2f} сек")
+            except Exception as e:
+                logger.exception(f"[{session_id}] ❌ Ошибка поиска: {e}")
+                yield "Ошибка при поиске документов."
+                return
+
             if not docs:
+                logger.debug(f"[{session_id}] ❗ Документы не найдены")
                 yield "Информация не найдена."
                 return
 
             yield "✅ Документы найдены. Формирую ответ...\n"
 
             # Ждём историю
-            hist = await history_task
+            try:
+                hist = await history_task
+                hist_time = time.time() - embedding_start  # с момента запуска задачи
+                logger.debug(f"[{session_id}] ✅ История загружена за {hist_time:.2f} сек, сообщений: {len(hist)}")
+            except Exception as e:
+                logger.exception(f"[{session_id}] ❌ Ошибка загрузки истории: {e}")
+                hist = []
+
             history_text = "\n".join(f"{m.type.capitalize()}: {m.content}" for m in hist)
 
             # Формируем контекст
-            context, _ = self._build_context(docs, session_id)  # передаём уже готовую историю
+            context_start = time.time()
+            try:
+                context, _ = self._build_context(docs, session_id)
+                context_time = time.time() - context_start
+                context_len = len(context)
+                token_count = count_tokens(context) if context else 0
+                logger.debug(
+                    f"[{session_id}] ✅ Контекст сформирован за {context_time:.2f} сек, токенов: {token_count}, символов: {context_len}")
+            except Exception as e:
+                logger.exception(f"[{session_id}] ❌ Ошибка формирования контекста: {e}")
+                yield "Ошибка при подготовке контекста."
+                return
+
             if not context:
+                logger.warning(f"[{session_id}] Контекст пуст после построения")
                 yield "Информация не найдена."
                 return
 
+            # Генерация ответа LLM
             prompt = self._build_prompt(
                 mode=self.config.MODE,
                 question=question,
@@ -359,15 +405,26 @@ class RAGCore:
 
             full = ""
             buffer = ""
+            llm_start = time.time()
+
             try:
+                logger.debug(f"[{session_id}] 🧠 Начинаю генерацию LLM...")
+                first_token_received = False
+                token_count = 0
+
                 async for chunk in self.llm.astream([{"role": "user", "content": prompt}]):
                     if content := chunk.content:
-                        if not full:  # первый токен — сразу отдаем
+                        if not first_token_received:
+                            first_token_time = time.time() - llm_start
+                            logger.debug(f"[{session_id}] ⚡ Первый токен LLM получен за {first_token_time:.2f} сек")
+                            first_token_received = True
                             yield "🧠 Генерирую ответ...\n"
+
                         full += content
-                        # yield content
+                        token_count += 1
 
                         # Отправляем, только если накопилось достаточно или встретили знак препинания
+                        buffer += content
                         if len(buffer) > 50 or content in ".!?\n":
                             yield buffer
                             buffer = ""
@@ -376,17 +433,29 @@ class RAGCore:
                 if buffer:
                     yield buffer
 
-                # Сохраняем в историю
-                history = self.get_history(session_id)
-                history.add_message(HumanMessage(content=question))
-                history.add_message(AIMessage(content=full))
+                total_llm_time = time.time() - llm_start
+                logger.debug(f"[{session_id}] ✅ LLM сгенерировал {token_count} токенов за {total_llm_time:.2f} сек")
+
+                # --- Этап 7: Сохранение в историю ---
+                save_start = time.time()
+                try:
+                    history = self.get_history(session_id)
+                    history.add_message(HumanMessage(content=question))
+                    history.add_message(AIMessage(content=full))
+                    save_time = time.time() - save_start
+                    logger.debug(f"[{session_id}] 💾 Ответ сохранён в историю за {save_time:.2f} сек")
+                except Exception as e:
+                    logger.exception(f"[{session_id}] ❌ Ошибка сохранения в историю: {e}")
 
             except Exception as e:
-                logger.exception("Ошибка при генерации ответа: %s", e)
+                logger.exception(f"[{session_id}] ❌ Ошибка при генерации ответа: {e}")
                 yield "Произошла ошибка при генерации ответа."
 
-        self.qa_chain_with_history = generate_answer_stream
-        logger.info("QA-генератор со стримингом и историей настроен")
+            total_time = time.time() - start_time
+            logger.debug(f"[{session_id}] 🎯 Полное время обработки: {total_time:.2f} сек")
+
+            self.qa_chain_with_history = generate_answer_stream
+            logger.info("QA-генератор со стримингом и историей настроен")
 
     async def close(self) -> None:
         # Корректно закрываем соединение с Milvus
