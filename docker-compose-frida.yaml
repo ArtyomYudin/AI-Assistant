@@ -105,6 +105,9 @@ services:
       - MILVUS_LOG_LEVEL=info
       - ETCD_ENDPOINTS=etcd:2379
       - MINIO_ADDRESS=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET_NAME=milvus
       - MQ_TYPE=woodpecker
     command: ["milvus", "run", "standalone"]
     security_opt:
