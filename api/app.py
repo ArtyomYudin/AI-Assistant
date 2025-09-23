@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from typing import List, Optional, AsyncGenerator
 import json
 import asyncio
@@ -14,12 +15,31 @@ from core.rag_core import RAGCore
 
 logger = logging.getLogger(__name__)
 
+cfg = RAGConfig()
+core: RAGCore | None = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global core
+    logger.info("🚀 Инициализация RAGCore...")
+    try:
+        core = RAGCore(cfg)
+        core.create_retriever(k=cfg.K, fetch_k=cfg.FETCH_K)
+        core.create_qa_generator()
+        logger.info("✅ RAGCore успешно инициализирован")
+    except Exception as e:
+        logger.exception("❌ Ошибка инициализации RAGCore: %s", e)
+        raise
+
+    yield
+
+    # Закрытие при завершении
+    if core:
+        await core.close()
+        logger.info("🔌 RAGCore закрыт")
+
 app = FastAPI(title="RAG API (Streaming)", version="1.0.0")
 
-cfg = RAGConfig()
-core = RAGCore(cfg)
-core.create_retriever(k=cfg.K, fetch_k=cfg.FETCH_K)
-core.create_qa_generator()
 
 class AskRequest(BaseModel):
     question: str = Field(..., description="Пользовательский вопрос")
@@ -37,6 +57,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 @app.get("/health")
 async def health():
