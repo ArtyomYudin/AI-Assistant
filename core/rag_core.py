@@ -14,7 +14,12 @@ from core.splitters import SplitterManager
 from core.utils import count_tokens, truncate_text_by_tokens
 from core.embedding_cache import RedisEmbeddingCache
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s: %(message)s")
+# Настраиваем логирование приложения
+logging.basicConfig(
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
+    format="%(asctime)s | %(levelname)-8s | %(name)s: %(message)s",
+    handlers=[logging.StreamHandler()]
+)
 logger = logging.getLogger(__name__)
 
 class RAGCore:
