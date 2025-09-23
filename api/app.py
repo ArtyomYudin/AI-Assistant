@@ -1,9 +1,15 @@
 import os
+import logging
+
+# Настраиваем логирование приложения
+logging.basicConfig(
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
+    format="%(asctime)s | %(levelname)-8s | %(name)s: %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+
 from contextlib import asynccontextmanager
 from typing import List, Optional, AsyncGenerator
-import json
-import asyncio
-import logging
 
 from fastapi import FastAPI, Body, Query
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -14,12 +20,6 @@ from starlette.middleware.cors import CORSMiddleware
 from config.rag_config import RAGConfig
 from core.rag_core import RAGCore
 
-# Настраиваем логирование приложения
-logging.basicConfig(
-    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
-    format="%(asctime)s | %(levelname)-8s | %(name)s: %(message)s",
-    handlers=[logging.StreamHandler()]
-)
 logger = logging.getLogger(__name__)
 
 cfg = RAGConfig()

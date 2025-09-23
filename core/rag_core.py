@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 import time
 from typing import List, Optional
 
@@ -15,12 +14,6 @@ from core.splitters import SplitterManager
 from core.utils import count_tokens, truncate_text_by_tokens
 from core.embedding_cache import RedisEmbeddingCache
 
-# Настраиваем логирование приложения
-logging.basicConfig(
-    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
-    format="%(asctime)s | %(levelname)-8s | %(name)s: %(message)s",
-    handlers=[logging.StreamHandler()]
-)
 logger = logging.getLogger(__name__)
 
 class RAGCore:
