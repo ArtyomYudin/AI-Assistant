@@ -256,19 +256,20 @@ class RAGCore:
 
     def _build_context(self, docs: List[Document], session_id: str) -> tuple[str, str]:
         """
-            Формирует контекст для LLM с учетом:
-              - истории чата (суммаризация старых сообщений при необходимости)
-              - контекста документов
-              - лимита токенов MAX_CONTEXT_TOKENS
-            Возвращает (context_documents, history_text)
-            """
+        Формирует контекст для LLM с учетом:
+          - истории чата (суммаризация старых сообщений при необходимости)
+          - контекста документов
+          - лимита токенов MAX_CONTEXT_TOKENS
+          - детерминированного порядка документов
+        Возвращает (context_documents, history_text)
+        """
 
-        # Получаем историю
+        # --- История чата ---
         hist = self.get_history(session_id).get_messages()
-        history_tokens = 0
         truncated_history = []
+        history_tokens = 0
 
-        # Идём с конца (последние сообщения важнее)
+        # Берём последние сообщения (с конца), чтобы последние важные сообщения вошли
         for m in reversed(hist):
             msg_text = f"{m.type.capitalize()}: {m.content}"
             tks = count_tokens(msg_text)
@@ -277,25 +278,37 @@ class RAGCore:
             truncated_history.insert(0, msg_text)  # вставляем в начало
             history_tokens += tks
 
-        # Если история слишком длинная — создаём резюме старых сообщений
-        if len(truncated_history) < len(hist):
-            # старые сообщения, которые не вошли
-            old_msgs = hist[:len(hist) - len(truncated_history)]
-            old_text = "\n".join(f"{m.type.capitalize()}: {truncate_text_by_tokens(m.content, 200)}" for m in old_msgs)
-            # Добавляем резюме как одно сообщение
+        # Старые сообщения, которые не вошли, суммируем в одно резюме
+        num_skipped = len(hist) - len(truncated_history)
+        if num_skipped > 0:
+            old_msgs = hist[:num_skipped]
+            old_text = "\n".join(
+                f"{m.type.capitalize()}: {truncate_text_by_tokens(m.content, 200)}"
+                for m in old_msgs
+            )
             truncated_history.insert(0, f"[Резюме предыдущих сообщений]: {old_text}")
+            history_tokens += count_tokens(truncated_history[0])
 
         history_text = "\n".join(truncated_history)
 
-        # Доступные токены для документов
+        # --- Доступные токены для документов ---
         available = self.config.MAX_CONTEXT_TOKENS - self.config.RESERVED_FOR_COMPLETION \
-                    - count_tokens(history_text) - self.config.RESERVED_FOR_OVERHEAD
+                    - history_tokens - self.config.RESERVED_FOR_OVERHEAD
         available = max(0, available)
+        if available <= 0:
+            return "", history_text
 
-        # Формируем контекст документов
+        # --- Детерминированная сортировка документов ---
+        # Сначала по score (убывание), затем по source (алфавит) для стабильного порядка
+        docs_sorted = sorted(
+            docs,
+            key=lambda d: (-d.metadata.get("score", 0), d.metadata.get("source", ""))
+        )
+
+        # --- Формирование контекста документов ---
         parts, used = [], 0
-        for d in sorted(docs, key=lambda x: x.metadata.get("score", 0), reverse=True):
-            text = f"[Источник: {d.metadata.get('source', 'N/A')}] {d.page_content.strip()}\n"
+        for d in docs_sorted:
+            text = f"[Источник: {d.metadata.get('source','N/A')}] {d.page_content.strip()}\n"
             tks = count_tokens(text)
             if used + tks > available:
                 remain = available - used
