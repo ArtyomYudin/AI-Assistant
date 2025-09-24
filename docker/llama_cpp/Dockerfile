@@ -1,5 +1,4 @@
-#FROM rocm/dev-ubuntu-22.04:6.3-complete
-FROM rocm/pytorch:rocm6.0_ubuntu22.04_py3.10
+FROM rocm/dev-ubuntu-22.04:6.3-complete
 # Установка зависимостей
 RUN apt-get update && apt-get install -y \
     git \
@@ -21,6 +20,7 @@ RUN mkdir build && cd build && \
       -DLLAMA_HIPBLAS=ON \
       -DLLAMA_CUDA=OFF \
       -DLLAMA_ACCELERATE=OFF \
+      -DLLAMA_CURL=OFF \               # отключаем CURL
       -DCMAKE_BUILD_TYPE=Release && \
     make -j$(nproc)
 
