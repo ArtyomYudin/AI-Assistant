@@ -32,4 +32,4 @@ RUN mkdir build && cd build && \
 EXPOSE 8001
 
 # Запуск сервера
-CMD ["./build/bin/llama-server", "-m", "/models/model.gguf", "--port", "8001", "--ctx-size", "4096", "--n-gpu-layers", "40"]
+CMD ["./build/bin/llama-server", "-m", "/models/model.gguf", "--host", "0.0.0.0", "--port", "8001", "--ctx-size", "4096", "--n-gpu-layers", "40"]
