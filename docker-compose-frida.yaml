@@ -1,60 +1,60 @@
 services:
   # === LLM Qwen на GPU0 ===
-#  llm:
-#    image: nalanzeyu/vllm-gfx906
-#    container_name: llm
-#    command: >
-#      vllm serve /models/Qwen/Qwen3-8B-AWQ
-#      --gpu-memory-utilization 0.85
-#      --max-model-len 16384
-#      --max-num-batched-tokens 16384
-#      --max-num-seqs 16
-#      --enable-prefix-caching
-#      --disable-log-requests
-#      --port 8001
-#      --served-model-name Qwen3-8B-AWQ
-#    environment:
-#      - CUDA_VISIBLE_DEVICES=0
-#    ports:
-#      - "8001:8001"
-#    volumes:
-#      - /storage/models:/models
-#    shm_size: "16g"
-#    ipc: host
-#    devices:
-#      - /dev/kfd
-#      - /dev/dri
-#    group_add:
-#      - video
-#    cap_add:
-#      - SYS_PTRACE
-#    security_opt:
-#      - seccomp=unconfined
-#      - apparmor=unconfined
   llm:
-    build:
-      context: ./docker/llama_cpp
-      dockerfile: Dockerfile
-    container_name: llm-gguf
+    image: nalanzeyu/vllm-gfx906
+    container_name: llm
+    command: >
+      vllm serve /models/Qwen/Qwen3-8B-AWQ
+      --gpu-memory-utilization 0.85
+      --max-model-len 16384
+      --max-num-batched-tokens 16384
+      --max-num-seqs 16
+      --enable-prefix-caching
+      --disable-log-requests
+      --port 8001
+      --served-model-name Qwen3-8B-AWQ
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
     ports:
       - "8001:8001"
     volumes:
-      - /storage/models/Qwen/Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf:/models/model.gguf
+      - /storage/models:/models
+    shm_size: "16g"
+    ipc: host
     devices:
       - /dev/kfd
       - /dev/dri
     group_add:
       - video
-    environment:
-      - HSA_OVERRIDE_GFX_VERSION=9.0.6  # важно для gfx906!
-      - ROCR_VISIBLE_DEVICES=0
     cap_add:
       - SYS_PTRACE
     security_opt:
       - seccomp=unconfined
       - apparmor=unconfined
-    shm_size: "16g"
-    ipc: host
+#  llm:
+#    build:
+#      context: ./docker/llama_cpp
+#      dockerfile: Dockerfile
+#    container_name: llm-gguf
+#    ports:
+#      - "8001:8001"
+#    volumes:
+#      - /storage/models/Qwen/Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf:/models/model.gguf
+#    devices:
+#      - /dev/kfd
+#      - /dev/dri
+#    group_add:
+#      - video
+#    environment:
+#      - HSA_OVERRIDE_GFX_VERSION=9.0.6  # важно для gfx906!
+#      - ROCR_VISIBLE_DEVICES=0
+#    cap_add:
+#      - SYS_PTRACE
+#    security_opt:
+#      - seccomp=unconfined
+#      - apparmor=unconfined
+#    shm_size: "16g"
+#    ipc: host
 
   # === FRIDA Embeddings на GPU1 ===
   frida-embeddings:
