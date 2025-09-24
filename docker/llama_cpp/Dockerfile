@@ -20,7 +20,7 @@ RUN mkdir build && cd build && \
       -DLLAMA_HIPBLAS=ON \
       -DLLAMA_CUDA=OFF \
       -DLLAMA_ACCELERATE=OFF \
-      -DLLAMA_CURL=OFF \               # отключаем CURL
+      -DLLAMA_CURL=OFF \
       -DCMAKE_BUILD_TYPE=Release && \
     make -j$(nproc)
 
