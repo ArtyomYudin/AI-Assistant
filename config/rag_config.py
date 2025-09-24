@@ -28,7 +28,7 @@ class RAGConfig(BaseSettings):
 
     # History
     USE_REDIS_HISTORY: bool = True
-    MAX_HISTORY_MESSAGES: int = 5
+    MAX_HISTORY_MESSAGES: int = 3
     HISTORY_TTL_DAYS: int = 7
 
     # Indexing

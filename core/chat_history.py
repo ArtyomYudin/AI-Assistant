@@ -39,7 +39,6 @@ class RedisChatHistory(BaseChatMessageHistory):
         self.key = f"chat_history:{session_id}"
         self.ttl = timedelta(days=ttl_days)  # TTL в секундах
         self.max_messages = max_messages  # ограничение
-        print(">>> RedisChatHistory init: max_messages =", max_messages)
 
     def add_message(self, message):
         """Добавляет сообщение в историю."""
