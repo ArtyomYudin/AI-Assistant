@@ -134,7 +134,8 @@ class RAGCore:
             session_id = session_id,
             host = self.config.REDIS_HOST,
             port = self.config.REDIS_PORT,
-            ttl_days = self.config.HISTORY_TTL_DAYS
+            ttl_days = self.config.HISTORY_TTL_DAYS,
+            max_messages=self.config.MAX_HISTORY_MESSAGES
         )
 
     def load_documents(self, directory: Optional[str] = None) -> List[Document]:
