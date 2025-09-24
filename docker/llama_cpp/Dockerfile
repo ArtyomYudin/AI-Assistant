@@ -1,4 +1,5 @@
-FROM rocm/dev-ubuntu-22.04:6.3-complete
+#FROM rocm/dev-ubuntu-22.04:6.3-complete
+FROM rocm/pytorch:rocm6.0_ubuntu22.04_py3.10
 # Установка зависимостей
 RUN apt-get update && apt-get install -y \
     git \
