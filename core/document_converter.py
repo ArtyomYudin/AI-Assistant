@@ -44,7 +44,7 @@ def file_to_markdown(path: str) -> str:
 # --- Пример использования ---
 if __name__ == "__main__":
     start_time = time.time()
-    md_text = file_to_markdown("../scraped_data/instructions/polygon.pdf")
+    md_text = file_to_markdown("../scraped_data/instructions/polygon.pdf_bak")
     print(md_text[:1000])  # печатаем первые 1000 символов Markdown
     end_time = time.time() - start_time
     print(f"Document converted in {end_time:.2f} seconds.")

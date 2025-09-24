@@ -30,6 +30,8 @@ class RAGConfig(BaseSettings):
     USE_REDIS_HISTORY: bool = True
     MAX_HISTORY_MESSAGES: int = 3
     HISTORY_TTL_DAYS: int = 7
+    MAX_HISTORY_TOKENS:int = 1024  # Бюджет токенов на историю
+    MIN_DOC_TOKEN:int  = 50  # Минимальный токен для документа
 
     # Indexing
     INDEX_BATCH_SIZE: int = 100

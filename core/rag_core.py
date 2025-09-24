@@ -256,55 +256,56 @@ class RAGCore:
 
     def _build_context(self, docs: List[Document], session_id: str) -> tuple[str, str]:
         """
-            Формирует части для LLM:
-            - историю чата (обрезает слишком длинные сообщения)
-            - контекст документов (с учётом лимита токенов)
-            - учитывает лимит токенов
-            Возвращает (context, history_text).
-        """
-        # История чата — берём последние MAX_HISTORY_MESSAGES сообщений
-        history_obj = self.get_history(session_id)
-        hist = history_obj.get_messages()
-        hist = hist[-self.config.MAX_HISTORY_MESSAGES:]  # последние N сообщений
-        # Обрезаем каждое сообщение до разумного количества токенов, например 500
-        history_text = "\n".join(
-            f"{m.type.capitalize()}: {truncate_text_by_tokens(m.content, 500)}" for m in hist
-        )
+            Формирует контекст для LLM с учетом:
+              - истории чата (суммаризация старых сообщений при необходимости)
+              - контекста документов
+              - лимита токенов MAX_CONTEXT_TOKENS
+            Возвращает (context_documents, history_text)
+            """
 
-        # Считаем доступные токены для документов
+        # Получаем историю
+        hist = self.get_history(session_id).get_messages()
+        history_tokens = 0
+        truncated_history = []
+
+        # Идём с конца (последние сообщения важнее)
+        for m in reversed(hist):
+            msg_text = f"{m.type.capitalize()}: {m.content}"
+            tks = count_tokens(msg_text)
+            if history_tokens + tks > self.config.MAX_HISTORY_TOKENS:
+                break
+            truncated_history.insert(0, msg_text)  # вставляем в начало
+            history_tokens += tks
+
+        # Если история слишком длинная — создаём резюме старых сообщений
+        if len(truncated_history) < len(hist):
+            # старые сообщения, которые не вошли
+            old_msgs = hist[:len(hist) - len(truncated_history)]
+            old_text = "\n".join(f"{m.type.capitalize()}: {truncate_text_by_tokens(m.content, 200)}" for m in old_msgs)
+            # Добавляем резюме как одно сообщение
+            truncated_history.insert(0, f"[Резюме предыдущих сообщений]: {old_text}")
+
+        history_text = "\n".join(truncated_history)
+
+        # Доступные токены для документов
         available = self.config.MAX_CONTEXT_TOKENS - self.config.RESERVED_FOR_COMPLETION \
                     - count_tokens(history_text) - self.config.RESERVED_FOR_OVERHEAD
-        if available <= 0:
-            logger.warning(
-                f"[{session_id}] Доступные токены для документов <= 0 ({available}). "
-                f"Добавляем хотя бы первый документ в контекст."
-            )
-            # fallback: добавляем первый документ
-            if docs:
-                text = f"[Источник: {docs[0].metadata.get('source', 'N/A')}] {docs[0].page_content.strip()}"
-                return truncate_text_by_tokens(text, 500), history_text
-            else:
-                return "", history_text
+        available = max(0, available)
 
-        # Добавляем документы до исчерпания лимита токенов
+        # Формируем контекст документов
         parts, used = [], 0
         for d in sorted(docs, key=lambda x: x.metadata.get("score", 0), reverse=True):
             text = f"[Источник: {d.metadata.get('source', 'N/A')}] {d.page_content.strip()}\n"
             tks = count_tokens(text)
             if used + tks > available:
                 remain = available - used
-                if remain > 50:
+                if remain > self.config.MIN_DOC_TOKEN:
                     parts.append(truncate_text_by_tokens(text, remain))
                 break
             parts.append(text)
             used += tks
 
         context = "".join(parts).strip()
-
-        # Если контекст всё ещё пустой (например документы очень длинные), добавляем первый документ частично
-        if not context and docs:
-            context = truncate_text_by_tokens(docs[0].page_content.strip(), min(available, 500))
-
         return context, history_text
 
     def _build_prompt(self, mode: str, question: str, context: str, history_text: str) -> str:
@@ -374,6 +375,7 @@ class RAGCore:
                 docs = await self.retriever(question)
                 search_time = time.time() - search_start
                 logger.debug(f"[{session_id}] ✅ Найдено {len(docs)} документов за {search_time:.2f} сек")
+                logger.debug(docs)
             except Exception as e:
                 logger.exception(f"[{session_id}] ❌ Ошибка поиска: {e}")
                 yield "Ошибка при поиске документов."
