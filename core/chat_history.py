@@ -39,6 +39,7 @@ class RedisChatHistory(BaseChatMessageHistory):
         self.key = f"chat_history:{session_id}"
         self.ttl = timedelta(days=ttl_days)  # TTL в секундах
         self.max_messages = max_messages  # ограничение
+        print(">>> RedisChatHistory init: max_messages =", max_messages)
 
     def add_message(self, message):
         """Добавляет сообщение в историю."""
@@ -56,8 +57,8 @@ class RedisChatHistory(BaseChatMessageHistory):
             # Ограничиваем длину списка
             pipe.ltrim(self.key, 0, self.max_messages - 1)
             # Устанавливаем TTL, если ключа ещё нет
-            if self.redis_client.ttl(self.key) == -1:  # ключ не имеет TTL
-                pipe.expire(self.key, int(self.ttl.total_seconds()))
+            # if self.redis_client.ttl(self.key) == -1:  # ключ не имеет TTL
+            pipe.expire(self.key, int(self.ttl.total_seconds()))
             pipe.execute()
         except Exception as e:
             logger.warning("Ошибка при сохранении сообщения в Redis: %s", e)

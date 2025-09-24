@@ -28,7 +28,9 @@ class RAGCore:
     """
     def __init__(self, config: Optional[RAGConfig] = None):
         # Загружаем конфиг или используем значения по умолчанию
+        # self.config = config or RAGConfig()
         self.config = config or RAGConfig()
+        print(">>> RAGCore init: config.MAX_HISTORY_MESSAGES =", self.config.MAX_HISTORY_MESSAGES)
 
         # Менеджер истории диалога (хранит переписку)
         self.history = RedisChatHistory(
