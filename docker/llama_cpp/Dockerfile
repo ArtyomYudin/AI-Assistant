@@ -21,6 +21,7 @@ RUN mkdir build && cd build && \
       -DLLAMA_CUDA=OFF \
       -DLLAMA_ACCELERATE=OFF \
       -DLLAMA_CURL=OFF \
+      -DLLAMA_BUILD_SERVER=ON \
       -DCMAKE_BUILD_TYPE=Release && \
     make -j$(nproc)
 
