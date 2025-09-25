@@ -35,20 +35,23 @@ class SplitterManager:
                 logger.warning("Ошибка при разбиении по заголовкам: %s", e)
                 header_docs = [Document(page_content=content, metadata={})]
             for h_doc in header_docs:
+                # Собираем заголовки в одну строку
                 headers = [h_doc.metadata.get(k) for _, k in HEADERS_TO_SPLIT_ON if k in h_doc.metadata]
-                prefix = " > ".join(filter(None, headers)) + "\n" if headers else ""
+                title = " > ".join(filter(None, headers)) if headers else doc.metadata.get("title", "")
+
+                # Дробим дальше, если нужно
                 if len(h_doc.page_content) > self.recursive._chunk_size:  # noqa: SLF001
                     try:
                         subs = self.recursive.split_documents([h_doc])
                         for s in subs:
-                            s.page_content = prefix + s.page_content
+                            s.metadata["title"] = title
                         chunks.extend(subs)
                     except Exception as e:
                         logger.warning("Ошибка при рекурсивном разбиении: %s", e)
-                        h_doc.page_content = prefix + h_doc.page_content
+                        h_doc.metadata["title"] = title
                         chunks.append(h_doc)
                 else:
-                    h_doc.page_content = prefix + h_doc.page_content
+                    h_doc.metadata["title"] = title
                     chunks.append(h_doc)
         for c in chunks:
             c.metadata["hash"] = hash_text(c.page_content)

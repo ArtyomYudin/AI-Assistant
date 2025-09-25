@@ -55,7 +55,7 @@ class RAGConfig(BaseSettings):
 
     # PROMPTS
     QA_PROMPT_TEMPLATE: str = (
-        "Вы — экспертный ассистент АО ЦентрИнформ. Отвечайте ТОЛЬКО на основе контекста.\n"
+        "Вы — экспертный ассистент отдела ИТО. Отвечайте ТОЛЬКО на основе контекста.\n"
         "Контекст:\n{context}\n\n"
         "История диалога:\n{chat_history}\n\n"
         "Текущий вопрос: {question}\n\n"
@@ -93,7 +93,7 @@ class RAGConfig(BaseSettings):
         "Ответ:"
     )
     QA_PROMPT_HYBRID_EN: str = (
-        "You are an expert assistant in the ИТО department. Your name is Nicole.\n"
+        "You are an expert assistant in the ИТО department. Your name is Elsa.\n"
         "Use the provided documents if available. "
         "If the documents are insufficient — supplement the answer with your own knowledge "
         "(mark such parts as [по памяти]).\n\n"

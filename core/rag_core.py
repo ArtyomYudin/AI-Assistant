@@ -164,6 +164,7 @@ class RAGCore:
             logger.warning("Нет документов после обработки")
             return
         texts = [d.page_content for d in processed]
+        title = [d.metadata.get("title") for d in processed]
         sources = [d.metadata.get("source","N/A") for d in processed]
         hashes = [d.metadata.get("hash") for d in processed]
 
@@ -184,9 +185,10 @@ class RAGCore:
         # Подготавливаем данные для вставки
         rows = [
             {"text": t,
+             "title": tit,
              "source": s,
              "hash": h or "",
-             "dense_vector": dv} for t, s, dv, h in zip(texts, sources, dense_vectors, hashes)]
+             "dense_vector": dv} for t, tit, s, dv, h in zip(texts, title, sources, dense_vectors, hashes)]
 
         # Убираем дубликаты
         unique = await self.milvus.ensure_not_duplicate_rows(rows)
@@ -388,7 +390,7 @@ class RAGCore:
                 docs = await self.retriever(question)
                 search_time = time.time() - search_start
                 logger.debug(f"[{session_id}] ✅ Найдено {len(docs)} документов за {search_time:.2f} сек")
-                logger.debug(docs)
+                logger.info(f"BLA BLA BLA {docs}")
             except Exception as e:
                 logger.exception(f"[{session_id}] ❌ Ошибка поиска: {e}")
                 yield "Ошибка при поиске документов."

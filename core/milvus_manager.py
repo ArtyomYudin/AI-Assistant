@@ -64,16 +64,18 @@ class MilvusManager:
         # Создание схемы коллекции
         schema = self.client.create_schema(auto_id=True, description="CentrInform RAG")
         schema.add_field(field_name="id", datatype=DataType.INT64, is_primary=True)
-        schema.add_field(field_name="text", datatype=DataType.VARCHAR, max_length=65535, enable_analyzer=True)
+        schema.add_field(field_name="text", datatype=DataType.VARCHAR, max_length=65535, enable_analyzer=True) # чисто тело
+        schema.add_field(field_name="text_full", datatype=DataType.VARCHAR, max_length=65535, enable_analyzer=True)  # title + тело
+        schema.add_field(field_name="title", datatype=DataType.VARCHAR, max_length=512)
         schema.add_field(field_name="source", datatype=DataType.VARCHAR, max_length=512)
         schema.add_field(field_name="hash", datatype=DataType.VARCHAR, max_length=64)
         schema.add_field(field_name="dense_vector", datatype=DataType.FLOAT_VECTOR, dim=dense_dim)
         schema.add_field(field_name="sparse_vector", datatype=DataType.SPARSE_FLOAT_VECTOR)
 
-        # Добавляем BM25 для sparse-вектора
+        # Добавляем BM25 для sparse-вектора (по text_full)
         schema.add_function(Function(
             name = "text_bm25_emb",
-            input_field_names = ["text"],
+            input_field_names = ["text_full"],
             output_field_names = ["sparse_vector"],
             function_type = FunctionType.BM25,
         ))
@@ -151,6 +153,10 @@ class MilvusManager:
         if not rows:
             return 0
         try:
+            for row in rows:
+                title = row.get("title", "")
+                body = row.get("text", "")
+                row["text_full"] = f"{title}. {body}" if title else body
             await self.client.insert(self.collection_name, rows)
             await self.client.flush(collection_name=self.collection_name)
             return len(rows)
@@ -213,7 +219,7 @@ class MilvusManager:
                 collection_name = self.collection_name,
                 reqs = [req_dense, req_sparse],
                 ranker = ranker,
-                output_fields = ["text","source","hash"],
+                output_fields = ["text","title","source","hash"],
                 limit = top_k
             )
 
@@ -227,6 +233,7 @@ class MilvusManager:
                             Document(
                                 page_content = ent.get("text",""),
                                 metadata = {
+                                    "title": ent.get("title", ""),
                                     "source": ent.get("source","N/A"),
                                     "hash": ent.get("hash",""),
                                     "score": getattr(res,"score",0)
