@@ -1,3 +1,4 @@
+import json
 import os
 import logging
 
@@ -94,7 +95,7 @@ async def ask_stream(req: AskRequest):
 async def ask_sse(question: str = Query(...), session_id: str = Query("api-sse")):
     async def event_publisher() -> AsyncGenerator[dict, None]:
         async for chunk in core.qa_chain_with_history(question, session_id=session_id):
-            yield {"event": "token", "data": chunk}
+            yield {"event": "token", "data": json.dumps(chunk)}
         yield {"event": "done", "data": ""}
     return EventSourceResponse(event_publisher())
 
