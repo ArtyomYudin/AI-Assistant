@@ -352,7 +352,10 @@ class RAGCore:
 
             if not question.strip():
                 logger.warning(f"[{session_id}] Получен пустой вопрос")
-                yield "Пожалуйста, задайте вопрос."
+                yield {
+                    "type": "response",  # или "message"
+                    "text": "Пожалуйста, задайте вопрос."
+                }
                 return
 
                 # Сразу отдаём первый токен — "отклик"
