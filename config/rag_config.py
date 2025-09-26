@@ -101,14 +101,23 @@ class RAGConfig(BaseSettings):
         "Use the provided documents in the Context as the ONLY source of factual information. "
         "Conversation history is given only to maintain continuity of dialogue, "
         "but it MUST NOT be used as a source of facts.\n\n"
+
+        "Very important: Context may include multiple unrelated documents. "
+        "When answering, use ONLY the fragments that are directly relevant to the Question. "
+        "Completely ignore unrelated fragments, even if they contain technical details.\n\n"
+
         "If the Context does not contain enough information to answer, "
         "you may supplement the answer with your own knowledge "
-        "(mark such parts explicitly as [по памяти]).\n"
-        "Do not add irrelevant information. If the answer is unknown — say so.\n\n"
+        "(mark such parts explicitly as [по памяти]). "
+        "Do not add irrelevant information. "
+        "If the answer is unknown — reply: \"Недостаточно данных для ответа.\"\n\n"
+
         "Context:\n{context}\n\n"
         "Conversation history (for continuity only, not for facts):\n{chat_history}\n\n"
         "Question: {question}\n\n"
-        "Step 1: Extract facts strictly from the Context (ignore Conversation history as a source).\n"
+
+        "Step 0: Identify which parts of Context are directly relevant to the Question.\n"
+        "Step 1: Extract facts strictly from the relevant parts of Context.\n"
         "Step 2: Formulate the answer based only on these extracted facts.\n"
         "Step 3: If Context lacks sufficient data — add a short supplement [по памяти], "
         "but only if it directly relates to the Question.\n"
