@@ -54,8 +54,8 @@ class RAGConfig(BaseSettings):
     REDIS_TTL: int = 24 * 3600
 
     # Chat Session
-    JWT_SECRET = "IOH7aLvm5j4EbKvsSjmx3v3PaY1yKss"  # возьми из настроек
-    JWT_ALGO = "HS256"
+    JWT_SECRET: str =  "IOH7aLvm5j4EbKvsSjmx3v3PaY1yKss"  # возьми из настроек
+    JWT_ALGO: str = "HS256"
 
     # PROMPTS
     QA_PROMPT_TEMPLATE: str = (
