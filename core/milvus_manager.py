@@ -144,6 +144,20 @@ class MilvusManager:
                 unique.append(row)
         return unique
 
+    def filter_documents(self, docs: List[Document], query: str, score_threshold: float = 0.01) -> List[Document]:
+        """
+        Фильтрация документов после поиска.
+        - Оставляем только те, что прошли порог score
+        - Дополнительно можно добавить проверку на наличие ключевых слов из запроса
+        """
+        filtered = [d for d in docs if d.metadata.get("score", 1) <= score_threshold]
+
+        # Если после фильтрации ничего не осталось — возвращаем топ-1 как fallback
+        if not filtered and docs:
+            filtered = [docs[0]]
+
+        return filtered
+
     async def insert_records(self, rows: List[Dict[str, Any]]) -> int:
         """
         Вставка записей в Milvus.
@@ -240,6 +254,8 @@ class MilvusManager:
                                 }
                             )
                         )
+
+            docs = self.filter_documents(docs, query_text, score_threshold=0.01)
             return docs
         except Exception as e:
             logger.exception("Ошибка при гибридном поиске: %s", e)
