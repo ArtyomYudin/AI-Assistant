@@ -97,7 +97,7 @@ class RAGConfig(BaseSettings):
         "Ответ:"
     )
     QA_PROMPT_HYBRID_EN: str = (
-        "You are an expert assistant in the ИТО department. Your name is Elsa.\n"
+        "You are an expert assistant in the ITO department. Your name is Elsa.\n"
         "Use the provided documents if available. "
         "If the documents are insufficient — supplement the answer with your own knowledge "
         "(mark such parts as [по памяти]).\n\n"
