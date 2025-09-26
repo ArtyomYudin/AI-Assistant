@@ -112,6 +112,5 @@ async def test_stream(req: TestRequest):
 
 @app.post("/merge-session")
 def merge_session(old_session_id: str, user_id: str = Depends(get_current_user)):
-    logger.info(user_id)
     moved = RedisChatHistory.merge(old_session_id, user_id)
     return {"status": "ok", "moved": moved}
