@@ -2,8 +2,13 @@ import hashlib
 import re
 from typing import Optional
 import tiktoken
+from fastapi import HTTPException, Header
+from jose import jwt, JWTError
+
+import config.rag_config
 
 _tokenizer = None
+
 
 def get_tokenizer():
     global _tokenizer
@@ -53,3 +58,13 @@ def normalize_score(score: float, ranked_by: str) -> float:
             return min(score / 10.0, 1.0)
     except Exception:
         return 0.0
+
+def get_current_user(authorization: str = Header(...)):
+    try:
+        scheme, token = authorization.split()
+        if scheme.lower() != "bearer":
+            raise HTTPException(status_code=401, detail="Invalid auth scheme")
+        payload = jwt.decode(token, config.rag_config.RAGConfig.JWT_SECRET, algorithms=[config.rag_config.RAGConfig.JWT_ALGO])
+        return payload.get("sub")
+    except (JWTError, ValueError):
+        raise HTTPException(status_code=401, detail="Invalid token")

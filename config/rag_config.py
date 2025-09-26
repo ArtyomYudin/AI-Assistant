@@ -53,6 +53,10 @@ class RAGConfig(BaseSettings):
     REDIS_PORT: int = 6379
     REDIS_TTL: int = 24 * 3600
 
+    # Chat Session
+    JWT_SECRET = "IOH7aLvm5j4EbKvsSjmx3v3PaY1yKss"  # возьми из настроек
+    JWT_ALGO = "HS256"
+
     # PROMPTS
     QA_PROMPT_TEMPLATE: str = (
         "Вы — экспертный ассистент отдела ИТО. Отвечайте ТОЛЬКО на основе контекста.\n"

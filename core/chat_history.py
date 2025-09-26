@@ -6,8 +6,15 @@ from langchain_core.messages import HumanMessage, AIMessage
 import redis
 from datetime import timedelta
 
+from pydantic import BaseModel
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+class MergeRequest(BaseModel):
+    session_id: str
+    user_id: str
+
 
 class RedisChatHistory(BaseChatMessageHistory):
     """
@@ -82,6 +89,25 @@ class RedisChatHistory(BaseChatMessageHistory):
     def clear(self):
         """Очищает историю."""
         self.redis_client.delete(self.key)
+
+    @classmethod
+    def merge(cls, src_session: str, dst_session: str, **kwargs) -> int:
+        """
+        Перенос истории из одной сессии в другую.
+        Возвращает количество перенесённых сообщений.
+        """
+        src = cls(src_session, **kwargs)
+        dst = cls(dst_session, **kwargs)
+
+        messages = src.get_messages()
+        if not messages:
+            return 0
+
+        for msg in messages:
+            dst.add_message(msg)
+
+        src.clear()
+        return len(messages)
 
     def __repr__(self):
         return f"RedisChatHistory(session_id={self.session_id}, ttl={self.ttl.days}d)"

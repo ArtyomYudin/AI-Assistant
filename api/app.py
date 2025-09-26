@@ -2,6 +2,8 @@ import json
 import os
 import logging
 
+from core.utils import get_current_user
+
 # Настраиваем логирование приложения
 logging.basicConfig(
     level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
@@ -12,7 +14,7 @@ logging.basicConfig(
 from contextlib import asynccontextmanager
 from typing import List, Optional, AsyncGenerator
 
-from fastapi import FastAPI, Body, Query
+from fastapi import FastAPI, Body, Query, Depends
 from fastapi.responses import StreamingResponse, JSONResponse
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel, Field
@@ -20,6 +22,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from config.rag_config import RAGConfig
 from core.rag_core import RAGCore
+from core.chat_history import RedisChatHistory
 
 logger = logging.getLogger(__name__)
 
@@ -106,3 +109,9 @@ async def test_stream(req: TestRequest):
         async for chunk in stream_answer_and_evaluate(core, req.question, req.expected_keywords, session_id=req.session_id or "test"):
             yield chunk
     return StreamingResponse(generator(), media_type="text/plain; charset=utf-8")
+
+@app.post("/merge-session")
+def merge_session(old_session_id: str, user_id: str = Depends(get_current_user)):
+    logger.info(user_id)
+    moved = RedisChatHistory.merge(old_session_id, user_id)
+    return {"status": "ok", "moved": moved}
