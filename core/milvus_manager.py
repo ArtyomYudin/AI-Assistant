@@ -93,7 +93,11 @@ class MilvusManager:
         index_params.add_index(
             field_name = "sparse_vector",
             index_type = "SPARSE_INVERTED_INDEX",
-            metric_type = "BM25"
+            metric_type = "BM25",
+            params={
+                "bm25_k1": 1.6,
+                "bm25_b": 0.0,  # ← отключаем нормализацию по длине
+            }
         )
 
         await self.client.create_collection(self.collection_name, schema = schema, index_params = index_params)
