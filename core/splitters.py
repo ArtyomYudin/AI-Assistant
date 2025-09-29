@@ -2,7 +2,7 @@ import logging
 from typing import List, Tuple
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
-from core.utils import clean_md_content, hash_text
+from core.utils import clean_md_content, hash_text, remove_bm25_comments, extract_global_bm25_text
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,13 @@ class SplitterManager:
             return []
         chunks: List[Document] = []
         for doc in documents:
-            content = clean_md_content(doc.page_content)
+            raw_content = doc.page_content
+            # Извлекаем ГЛОБАЛЬНЫЙ bm25_text для всего документа
+            global_bm25 = extract_global_bm25_text(raw_content)
+            # Удаляем комментарий из контента
+            content_wo_bm25 = remove_bm25_comments(raw_content)
+            logger.info("Извлечён global_bm25: %r", global_bm25)
+            content = clean_md_content(content_wo_bm25)
             if not content:
                 continue
             try:
@@ -39,19 +45,31 @@ class SplitterManager:
                 headers = [h_doc.metadata.get(k) for _, k in HEADERS_TO_SPLIT_ON if k in h_doc.metadata]
                 title = " > ".join(filter(None, headers)) if headers else doc.metadata.get("title", "")
 
+                # Формируем bm25_text для чанка:
+                #    - если есть глобальный — используем его + заголовок секции
+                #    - иначе — fallback на заголовок
+                if global_bm25:
+                    bm25_text = f"{title}. {global_bm25}"
+                else:
+                    bm25_text = title
+
                 # Дробим дальше, если нужно
                 if len(h_doc.page_content) > self.recursive._chunk_size:  # noqa: SLF001
                     try:
                         subs = self.recursive.split_documents([h_doc])
                         for s in subs:
                             s.metadata["title"] = title
+                            s.metadata["bm25_text"] = bm25_text
                         chunks.extend(subs)
                     except Exception as e:
                         logger.warning("Ошибка при рекурсивном разбиении: %s", e)
                         h_doc.metadata["title"] = title
+                        h_doc.metadata["bm25_text"] = bm25_text
                         chunks.append(h_doc)
                 else:
                     h_doc.metadata["title"] = title
+                    logger.info("Для чанка с заголовком %r установлен bm25_text: %r", title, bm25_text)
+                    h_doc.metadata["bm25_text"] = bm25_text
                     chunks.append(h_doc)
         for c in chunks:
             c.metadata["hash"] = hash_text(c.page_content)

@@ -39,6 +39,15 @@ def clean_md_content(content: str) -> str:
     content = re.sub(r"\n\s*\n", "\n\n", content)
     return content.strip()
 
+def extract_global_bm25_text(md_content: str) -> Optional[str]:
+    """Извлекает <!-- bm25: ... --> из всего документа."""
+    match = re.search(r"<!--\s*bm25:\s*(.*?)\s*-->", md_content, re.IGNORECASE | re.DOTALL)
+    return match.group(1).strip() if match else None
+
+def remove_bm25_comments(md_content: str) -> str:
+    """Удаляет <!-- bm25: ... --> из текста, чтобы не попал в чанки."""
+    return re.sub(r"<!--\s*bm25:.*?-->", "", md_content, flags=re.IGNORECASE | re.DOTALL)
+
 def normalize_score(score: float, ranked_by: str) -> float:
     """
     Нормализует score от Milvus или reranker в диапазон [0, 1].

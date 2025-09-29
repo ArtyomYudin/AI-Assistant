@@ -165,6 +165,7 @@ class RAGCore:
             return
         texts = [d.page_content for d in processed]
         title = [d.metadata.get("title") for d in processed]
+        bm25_text = [d.metadata.get("bm25_text") for d in processed]
         sources = [d.metadata.get("source","N/A") for d in processed]
         hashes = [d.metadata.get("hash") for d in processed]
 
@@ -186,9 +187,10 @@ class RAGCore:
         rows = [
             {"text": t,
              "title": tit,
+             "bm25_text": bm25,
              "source": s,
              "hash": h or "",
-             "dense_vector": dv} for t, tit, s, dv, h in zip(texts, title, sources, dense_vectors, hashes)]
+             "dense_vector": dv} for t, tit, bm25, s, dv, h in zip(texts, title, bm25_text, sources, dense_vectors, hashes)]
 
         # Убираем дубликаты
         unique = await self.milvus.ensure_not_duplicate_rows(rows)

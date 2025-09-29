@@ -66,6 +66,7 @@ class MilvusManager:
         schema.add_field(field_name="id", datatype=DataType.INT64, is_primary=True)
         schema.add_field(field_name="text", datatype=DataType.VARCHAR, max_length=65535, enable_analyzer=True) # чисто тело
         schema.add_field(field_name="text_full", datatype=DataType.VARCHAR, max_length=65535, enable_analyzer=True)  # title + тело
+        schema.add_field(field_name="bm25_text", datatype=DataType.VARCHAR, max_length=65535, enable_analyzer=True)
         schema.add_field(field_name="title", datatype=DataType.VARCHAR, max_length=512)
         schema.add_field(field_name="source", datatype=DataType.VARCHAR, max_length=512)
         schema.add_field(field_name="hash", datatype=DataType.VARCHAR, max_length=64)
@@ -75,7 +76,8 @@ class MilvusManager:
         # Добавляем BM25 для sparse-вектора (по text_full)
         schema.add_function(Function(
             name = "text_bm25_emb",
-            input_field_names = ["text_full"],
+            # input_field_names = ["text_full"],
+            input_field_names=["bm25_text"],
             output_field_names = ["sparse_vector"],
             function_type = FunctionType.BM25,
         ))
@@ -171,6 +173,7 @@ class MilvusManager:
                 title = row.get("title", "")
                 body = row.get("text", "")
                 row["text_full"] = f"{title}. {body}" if title else body
+                # row["bm25_text"] = row.get("bm25_text")
             await self.client.insert(self.collection_name, rows)
             await self.client.flush(collection_name=self.collection_name)
             return len(rows)
@@ -233,7 +236,7 @@ class MilvusManager:
                 collection_name = self.collection_name,
                 reqs = [req_dense, req_sparse],
                 ranker = ranker,
-                output_fields = ["text","title","source","hash"],
+                output_fields = ["text","title", "bm25_text", "source","hash"],
                 limit = top_k
             )
 
@@ -248,6 +251,7 @@ class MilvusManager:
                                 page_content = ent.get("text",""),
                                 metadata = {
                                     "title": ent.get("title", ""),
+                                    "bm25_text": ent.get("bm25_text"),
                                     "source": ent.get("source","N/A"),
                                     "hash": ent.get("hash",""),
                                     "score": getattr(res,"score",0)
