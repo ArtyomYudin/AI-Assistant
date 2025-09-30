@@ -96,12 +96,13 @@ class RAGConfig(BaseSettings):
         "Шаг 2: Составь ответ строго на основе этих фактов.\n"
         "Ответ:"
     )
+    #         "If Context lacks data, you may add a short supplement [from memory], but only if directly related. "
+    #         "4. If insufficient, add [from memory] (only if on-topic).\n\n"
     QA_PROMPT_HYBRID_EN: str = (
         "You are Elsa, an expert assistant from the ITO department.\n"
         "Use ONLY the Context as the source of facts. "
         "Conversation history is for dialogue continuity only, never as a fact source.\n"
         "Ignore irrelevant parts of Context. "
-        "If Context lacks data, you may add a short supplement [from memory], but only if directly related. "
         "If no answer is possible, reply: 'Insufficient data to answer.'\n\n"
 
         "Context:\n{context}\n\n"
@@ -112,7 +113,6 @@ class RAGConfig(BaseSettings):
         "1. Identify relevant parts of Context.\n"
         "2. Extract facts only from them.\n"
         "3. Formulate the answer.\n"
-        "4. If insufficient, add [from memory] (only if on-topic).\n\n"
         "Answer in Russian:\n"
     )
     QA_PROMPT_LLM_ONLY: str = (
