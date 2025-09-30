@@ -49,7 +49,8 @@ class SplitterManager:
                 #    - если есть глобальный — используем его + заголовок секции
                 #    - иначе — fallback на заголовок
                 if global_bm25:
-                    bm25_text = f"{title}. {global_bm25}"
+                    # bm25_text = f"{title}. {global_bm25}"
+                    bm25_text = global_bm25
                 else:
                     bm25_text = title
 

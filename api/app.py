@@ -14,7 +14,7 @@ logging.basicConfig(
 from contextlib import asynccontextmanager
 from typing import List, Optional, AsyncGenerator
 
-from fastapi import FastAPI, Body, Query, Depends
+from fastapi import FastAPI, Body, Query, Depends, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel, Field
@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 
 cfg = RAGConfig()
 core: RAGCore | None = None
+
+# Список разрешённых фронтенд-адресов
+ALLOWED_ORIGINS = [
+    "http://127.0.0.1:4200",  # дев
+    "https://itsupport.center-inform.ru",  # прод
+]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -95,12 +101,25 @@ async def ask_stream(req: AskRequest):
     return StreamingResponse(generator(), headers=headers)
 
 @app.get("/ask/sse")
-async def ask_sse(question: str = Query(...), session_id: str = Query("api-sse")):
+async def ask_sse(request: Request, question: str = Query(...), session_id: str = Query("api-sse")):
     async def event_publisher() -> AsyncGenerator[dict, None]:
         async for chunk in core.qa_chain_with_history(question, session_id=session_id):
             yield {"event": "token", "data": json.dumps(chunk)}
         yield {"event": "done", "data": ""}
-    return EventSourceResponse(event_publisher())
+
+    origin = request.headers.get("origin")
+    if origin in ALLOWED_ORIGINS:
+        allowed_origin = origin
+    else:
+        allowed_origin = ""  # Можно вернуть пустой или заблокировать
+    headers = {
+        "Access-Control-Allow-Origin": allowed_origin,
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",  # важно для nginx
+        "Content-Type": "text/event-stream; charset=utf-8",
+    }
+    return EventSourceResponse(event_publisher(), headers=headers)
 
 @app.post("/test/stream")
 async def test_stream(req: TestRequest):
