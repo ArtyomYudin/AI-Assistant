@@ -107,19 +107,19 @@ async def ask_sse(request: Request, question: str = Query(...), session_id: str 
             yield {"event": "token", "data": json.dumps(chunk)}
         yield {"event": "done", "data": ""}
 
-    origin = request.headers.get("origin")
-    if origin in ALLOWED_ORIGINS:
-        allowed_origin = origin
-    else:
-        allowed_origin = ""  # Можно вернуть пустой или заблокировать
-    headers = {
-        "Access-Control-Allow-Origin": allowed_origin,
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "X-Accel-Buffering": "no",  # важно для nginx
-        "Content-Type": "text/event-stream; charset=utf-8",
-    }
-    return EventSourceResponse(event_publisher(), headers=headers)
+    # origin = request.headers.get("origin")
+    # if origin in ALLOWED_ORIGINS:
+    #     allowed_origin = origin
+    # else:
+    #     allowed_origin = ""  # Можно вернуть пустой или заблокировать
+    # headers = {
+    #     "Access-Control-Allow-Origin": allowed_origin,
+    #     "Cache-Control": "no-cache",
+    #     "Connection": "keep-alive",
+    #     "X-Accel-Buffering": "no",  # важно для nginx
+    #     "Content-Type": "text/event-stream; charset=utf-8",
+    # }
+    return EventSourceResponse(event_publisher())
 
 @app.post("/test/stream")
 async def test_stream(req: TestRequest):
