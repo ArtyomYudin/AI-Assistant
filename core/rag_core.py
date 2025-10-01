@@ -332,7 +332,7 @@ class RAGCore:
         if mode == "rag":
             return self.config.QA_PROMPT_RAG_EN.format(context=context, chat_history=history_text, question=question)
         elif mode == "hybrid":
-            return self.config.QA_PROMPT_HYBRID_EN.format(context=context, chat_history=history_text, question=question)
+            return self.config.QA_PROMPT_HYBRID_RU.format(context=context, chat_history=history_text, question=question)
         elif mode == "llm_only":
             return self.config.QA_PROMPT_LLM_ONLY_EN.format(chat_history=history_text, question=question)
         else:
