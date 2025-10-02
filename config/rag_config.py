@@ -13,7 +13,7 @@ class RAGConfig(BaseSettings):
     # LLM / Embedding
     LLM_NAME: str = "Qwen3-8B-AWQ"
     LLM_BASE_URL: str = "http://172.20.4.50:8001/v1"
-    LLM_MAX_TOKEN: int = 4096
+    LLM_MAX_TOKEN: int = int(os.getenv("LLM_MAX_TOKEN", 4096))
     LLM_TEMPERATURE: float = 0.1
     EMBEDDING_NAME: str = "ai-forever/FRIDA"
     EMBEDDING_BASE_URL: str = "http://172.20.4.50:8000/v1"
@@ -46,9 +46,9 @@ class RAGConfig(BaseSettings):
     RERANKER_BASE_URL: str = "http://172.20.4.50:8002/v1/rerank"
 
     # Context control
-    MAX_CONTEXT_TOKENS: int = 8192
-    RESERVED_FOR_COMPLETION: int = 2048
-    RESERVED_FOR_OVERHEAD: int = 512
+    MAX_CONTEXT_TOKENS: int = int(os.getenv("MAX_CONTEXT_TOKENS", 8192))
+    RESERVED_FOR_COMPLETION: int = int(os.getenv("RESERVED_FOR_COMPLETION", 2048))
+    RESERVED_FOR_OVERHEAD: int = int(os.getenv("RESERVED_FOR_OVERHEAD", 512))
 
     # Redis
     REDIS_HOST: str = "172.20.4.50"

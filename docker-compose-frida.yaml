@@ -6,8 +6,8 @@ services:
     command: >
       vllm serve /models/Qwen/Qwen3-8B-AWQ
       --gpu-memory-utilization 0.85
-      --max-model-len 16384
-      --max-num-batched-tokens 16384
+      --max-model-len 12000
+      --max-num-batched-tokens 12000
       --max-num-seqs 16
       --enable-prefix-caching
       --disable-log-requests
@@ -208,6 +208,9 @@ services:
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=DEBUG
       - MAX_HISTORY_MESSAGES=1
+      - LLM_MAX_TOKEN=2048
+      - MAX_CONTEXT_TOKENS=8192
+      - RESERVED_FOR_COMPLETION=1024
     ports:
       - "8008:8008"
     command: >
