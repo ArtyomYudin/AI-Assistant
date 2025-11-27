@@ -5,6 +5,7 @@ from typing import List
 from langchain_core.messages import HumanMessage, AIMessage
 
 from config.rag_config import RAGConfig
+from core.collection_manager import CollectionManager
 from core.rag_core import RAGCore
 from core.eval import stream_answer_and_evaluate
 from core.chat_history import RedisChatHistory
@@ -19,6 +20,9 @@ async def init_rag():
     global core
     if core is None:
         core = RAGCore(cfg)
+        core.collection_manager = CollectionManager(core)
+        # await core.collection_manager.build_all_collections()
+        await core.collection_manager.build_router()
         core.create_retriever(k=cfg.K, fetch_k=cfg.FETCH_K)
         core.create_qa_generator()
     return core

@@ -190,6 +190,7 @@ class MilvusManager:
                             query_dense: List[float],
                             fetch_k: int,
                             top_k: int,
+                            collection_name: str = "",
                             reranker_endpoint: str = ""
                             ) -> List[Document]:
         """
@@ -198,6 +199,7 @@ class MilvusManager:
         :param query_dense: вектор эмбеддинга запроса
         :param fetch_k: сколько кандидатов брать до rerank
         :param top_k: сколько вернуть в ответе
+        :param collection_name: имя коллекции
         :param reranker_endpoint: если указан — использовать reranker (например, vLLM)
         :return: список документов LangChain Document
         """
@@ -237,7 +239,7 @@ class MilvusManager:
 
             # Выполняем гибридный поиск
             results = await self.client.hybrid_search(
-                collection_name = self.collection_name,
+                collection_name = collection_name, #self.collection_name,
                 reqs = [req_dense, req_sparse],
                 ranker = ranker,
                 output_fields = ["text","title", "bm25_text", "source","hash"],

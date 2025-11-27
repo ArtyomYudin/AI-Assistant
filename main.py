@@ -1,6 +1,8 @@
 import asyncio, logging
 from config.rag_config import RAGConfig
 from core.rag_core import RAGCore
+from core.collection_manager import CollectionManager
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -24,9 +26,20 @@ async def build_and_index(core: RAGCore, data_dir=None) -> None:
 async def main():
     cfg = RAGConfig()
     core = RAGCore(cfg)
-    await build_and_index(core)
+    # cm = CollectionManager(core)
+
+    # Строим все коллекции по папкам
+    await core.collection_manager.build_all_collections()
+
+    # Строим маршрутизатор коллекций
+    await core.collection_manager.build_router()
+
+    # await build_and_index(core)
     core.create_retriever(k=cfg.K, fetch_k=cfg.FETCH_K)
-    await demo_question(core, "как получить доступ к порталу?")
+    await demo_question(core, "список камер?")
+    # resp = await core.collection_manager.routed_search("как получить доступ к камерам?")
+    # print(resp)
+
     await core.close()
 
 if __name__ == "__main__":

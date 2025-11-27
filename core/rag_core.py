@@ -13,6 +13,7 @@ from core.milvus_manager import MilvusManager
 from core.splitters import SplitterManager
 from core.utils import count_tokens, truncate_text_by_tokens
 from core.embedding_cache import RedisEmbeddingCache
+from core.collection_manager import CollectionManager
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,9 @@ class RAGCore:
             port = self.config.REDIS_PORT,
             ttl = self.config.REDIS_TTL
         )
+
+        # менеджер коллекций
+        self.collection_manager = CollectionManager(core=self)
 
     async def __aenter__(self):
         return self
@@ -146,6 +150,56 @@ class RAGCore:
         """
         directory = directory or self.config.DATA_DIR
         return load_documents_from_directory(directory)
+
+    async def setup_collection(self, collection_name: str, documents: List[Document]):
+        """
+        Создаёт коллекцию Milvus с именем collection_name
+        и индексирует туда документы.
+        """
+
+        # Создаём отдельный экземпляр менеджера Milvus под коллекцию
+        milvus = MilvusManager(
+            uri=self.config.MILVUS_URI,
+            collection_name=collection_name,
+            recreate=self.config.RECREATE_COLLECTION
+        )
+
+        # Сплитинг по чанкам
+        processed = self.splitters.split_by_headers(documents)
+        if not processed:
+            return
+
+        texts = [d.page_content for d in processed]
+        titles = [d.metadata.get("title") for d in processed]
+        bm25_t = [d.metadata.get("bm25_text") for d in processed]
+        sources = [d.metadata.get("source", "N/A") for d in processed]
+        hashes = [d.metadata.get("hash") for d in processed]
+
+        # Эмбеддинги
+        dense_vectors = await self.embeddings.embed_documents(texts)
+        dim = len(dense_vectors[0])
+
+        await milvus.create_collection_if_needed(dense_dim=dim)
+
+        # Формируем записи
+        rows = [
+            {
+                "text": t,
+                "title": tit,
+                "bm25_text": b25,
+                "source": s,
+                "hash": h,
+                "dense_vector": dv,
+            }
+            for t, tit, b25, s, dv, h in zip(texts, titles, bm25_t, sources, dense_vectors, hashes)
+        ]
+
+        unique = await milvus.ensure_not_duplicate_rows(rows)
+        for i in range(0, len(unique), self.config.INDEX_BATCH_SIZE):
+            await milvus.insert_records(unique[i:i + self.config.INDEX_BATCH_SIZE])
+
+        await milvus.client.load_collection(collection_name)
+        logger.info("Коллекция %s загружена в память", collection_name)
 
     async def setup_vectorstore(self, documents: List[Document]) -> None:
         """
@@ -232,6 +286,38 @@ class RAGCore:
         k = k or self.config.K
         fetch_k = fetch_k or self.config.FETCH_K
 
+        async def routed_retrieve(query: str) -> List[Document]:
+            if not query.strip():
+                return []
+
+            # Определяем коллекцию
+            collection_name = await self.collection_manager.route_query(query)
+            if not collection_name:
+                logger.warning("Не удалось определить коллекцию для запроса")
+                return []
+            logger.info("Роутер выбрал коллекцию: %s", collection_name)
+
+            # Проверяем и загружаем коллекцию
+            if not await self.milvus.client.has_collection(collection_name):
+                logger.warning("Коллекция %s не найдена", collection_name)
+                return []
+            await self.milvus.ensure_collection_loaded(collection_name)
+
+            # Эмбеддинг
+            dense = await self._get_embedding_cached(query)
+            if dense is None:
+                return []
+
+            # Поиск
+            return await self.milvus.hybrid_search(
+                query_text=query,
+                query_dense=dense,
+                fetch_k=fetch_k,
+                top_k=k,
+                collection_name=collection_name,
+                reranker_endpoint=self.config.RERANKER_BASE_URL
+            )
+
         async def retrieve(query: str) -> List[Document]:
             if not query.strip():
                 return []
@@ -255,8 +341,10 @@ class RAGCore:
                 reranker_endpoint = self.config.RERANKER_BASE_URL
             )
 
-        self.retriever = retrieve
-        logger.info("Ретривер создан (k=%d, fetch_k=%d)", k, fetch_k)
+        # self.retriever = retrieve
+        # logger.info("Ретривер создан (k=%d, fetch_k=%d)", k, fetch_k)
+        self.retriever = routed_retrieve
+        logger.info("Ретривер с маршрутизацией создан (k=%d, fetch_k=%d)", k, fetch_k)
 
     def _build_context(self, docs: List[Document], session_id: str) -> tuple[str, str]:
         """
@@ -407,7 +495,7 @@ class RAGCore:
                 docs = await self.retriever(question)
                 search_time = time.time() - search_start
                 logger.debug(f"[{session_id}] ✅ Найдено {len(docs)} документов за {search_time:.2f} сек")
-                logger.info(f"BLA BLA BLA {docs}")
+                # logger.info(f"BLA BLA BLA {docs}")
             except Exception as e:
                 logger.exception(f"[{session_id}] ❌ Ошибка поиска: {e}")
                 yield {

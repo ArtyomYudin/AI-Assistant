@@ -2,6 +2,7 @@ import json
 import os
 import logging
 
+from core.collection_manager import CollectionManager
 from core.utils import get_current_user
 
 # Настраиваем логирование приложения
@@ -41,7 +42,13 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Инициализация RAGCore...")
     try:
         core = RAGCore(cfg)
+        core.collection_manager = CollectionManager(core)
+        # Индексация и создание коллекций
+        # await core.collection_manager.build_all_collections()
+        await core.collection_manager.build_router()
+        # Создаём ретривер с маршрутизацией
         core.create_retriever(k=cfg.K, fetch_k=cfg.FETCH_K)
+        # QA генератор использует retriever с маршрутизацией
         core.create_qa_generator()
         logger.info("✅ RAGCore успешно инициализирован")
     except Exception as e:
