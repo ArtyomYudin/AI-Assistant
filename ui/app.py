@@ -42,7 +42,10 @@ async def chat_answer_stream(message, history, session_id="gradio"):
     full_response = ""
     buffer = ""
     async for chunk in rag.qa_chain_with_history(message, session_id=session_id):
-        buffer += chunk
+        # --- FIX: chunk может быть dict ---
+        text = chunk.get("text") if isinstance(chunk, dict) else str(chunk)
+
+        buffer += text
         # отдаём партиями, например каждые 10 символов
         if len(buffer) >= 10:
             full_response += buffer
@@ -83,7 +86,9 @@ async def test_answer_stream(message, keywords_csv, history, session_id="gradio-
             except Exception:
                 yield full_response + "\n\n[Не удалось распарсить метрики]"
         else:
-            buffer += chunk
+            # buffer += chunk
+            text = chunk.get("text") if isinstance(chunk, dict) else str(chunk)
+            buffer += text
             if len(buffer) >= 10:
                 full_response += buffer
                 buffer = ""

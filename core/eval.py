@@ -13,8 +13,13 @@ async def stream_answer_and_evaluate(core, question: str, expected_keywords: Lis
     start = time.time()
     buffer = ""
     async for chunk in core.qa_chain_with_history(question, session_id=session_id):
-        buffer += chunk
-        yield chunk  # пробрасываем стрим наружу
+        # buffer += chunk
+        # yield chunk  # пробрасываем стрим наружу
+
+        # --- FIX: chunk может быть dict ---
+        text = chunk.get("text") if isinstance(chunk, dict) else str(chunk)
+        buffer += text
+        yield text  # пробрасываем наружу только строку
     dur = time.time() - start
     found, total, score, fmap = _coverage(buffer, expected_keywords or [])
     metrics = {
