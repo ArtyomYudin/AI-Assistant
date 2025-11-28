@@ -61,6 +61,7 @@ class SplitterManager:
                         for s in subs:
                             s.metadata["title"] = title
                             s.metadata["bm25_text"] = bm25_text
+                            logger.info("Рекурсивно установлен bm25_text для чанка с заголовком %r: %r", title, bm25_text)
                         chunks.extend(subs)
                     except Exception as e:
                         logger.warning("Ошибка при рекурсивном разбиении: %s", e)

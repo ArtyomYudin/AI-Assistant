@@ -36,7 +36,7 @@ async def main():
 
     # await build_and_index(core)
     core.create_retriever(k=cfg.K, fetch_k=cfg.FETCH_K)
-    await demo_question(core, "список камер?")
+    await demo_question(core, "список камер видеонаблюдения?")
     # resp = await core.collection_manager.routed_search("как получить доступ к камерам?")
     # print(resp)
 

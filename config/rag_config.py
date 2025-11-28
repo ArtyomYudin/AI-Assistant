@@ -8,19 +8,19 @@ class RAGConfig(BaseSettings):
     # Общие
     PROJECT_ROOT: Path = Path(__file__).parent.parent.resolve()
     DATA_DIR: str = "scraped_data"
-    MODE: str = "hybrid"  # rag, llm_only, hybrid
+    MODE: str = os.getenv("MODE", "hybrid")  # rag, llm_only, hybrid
 
     # LLM / Embedding
     LLM_NAME: str = "Qwen3-8B-AWQ"
     LLM_BASE_URL: str = "http://172.20.4.50:8001/v1"
     LLM_MAX_TOKEN: int = int(os.getenv("LLM_MAX_TOKEN", 4096))
-    LLM_TEMPERATURE: float = 0.1
+    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", 0.2))
     EMBEDDING_NAME: str = "ai-forever/FRIDA"
     EMBEDDING_BASE_URL: str = "http://172.20.4.50:8000/v1"
 
     # Milvus
     MILVUS_URI: str = "http://172.20.4.50:19530"
-    COLLECTION_NAME: str = "centrinform_rag"
+    COLLECTION_NAME: str = "portal"
     RECREATE_COLLECTION: bool = True
     CHECK_DUPLICATES_IN_MILVUS: bool = True
 
@@ -30,7 +30,7 @@ class RAGConfig(BaseSettings):
 
     # History
     USE_REDIS_HISTORY: bool = True
-    MAX_HISTORY_MESSAGES: int = int(os.getenv("MAX_HISTORY_MESSAGES", 3))
+    MAX_HISTORY_MESSAGES: int = int(os.getenv("MAX_HISTORY_MESSAGES", 1))
     HISTORY_TTL_DAYS: int = 7
     MAX_HISTORY_TOKENS:int = int(os.getenv("MAX_HISTORY_TOKENS", 1024))  # Бюджет токенов на историю
     MIN_DOC_TOKEN:int  = int(os.getenv("MIN_DOC_TOKEN", 50))  # Минимальный токен для документа

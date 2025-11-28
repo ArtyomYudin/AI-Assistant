@@ -537,6 +537,9 @@ class RAGCore:
                 token_count = count_tokens(context) if context else 0
                 logger.debug(
                     f"[{session_id}] ✅ Контекст сформирован за {context_time:.2f} сек, токенов: {token_count}, символов: {context_len}")
+                # logger.debug(
+                #     f"[{session_id}] ✅ Контекст: {context}")
+
             except Exception as e:
                 logger.exception(f"[{session_id}] ❌ Ошибка формирования контекста: {e}")
                 yield {

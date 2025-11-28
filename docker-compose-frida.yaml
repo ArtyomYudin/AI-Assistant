@@ -199,16 +199,19 @@ services:
 
   # RAG FastAPI
   rag-api:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
+#    build:
+#      context: .
+#      dockerfile: docker/Dockerfile
+    image: hanna.center-inform.ru/ai-assistant/rag:latest
     container_name: rag-api
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=DEBUG
+      - MODE=hybrid
       - MAX_HISTORY_MESSAGES=1
       - LLM_MAX_TOKEN=2048
+      - LLM_TEMPERATURE=0.2
       - MAX_CONTEXT_TOKENS=8192
       - RESERVED_FOR_COMPLETION=1024
     ports:
@@ -218,13 +221,21 @@ services:
 
   # Gradio UI
   rag-gradio:
-      build:
-        context: .
-        dockerfile: docker/Dockerfile  # можно использовать тот же Dockerfile
+#      build:
+#        context: .
+#        dockerfile: docker/Dockerfile  # можно использовать тот же Dockerfile
+      image: hanna.center-inform.ru/ai-assistant/rag:latest
       container_name: rag-gradio
       restart: unless-stopped
       environment:
         - PYTHONUNBUFFERED=1
+        - LOG_LEVEL=DEBUG
+        - MODE=hybrid
+        - MAX_HISTORY_MESSAGES=1
+        - LLM_MAX_TOKEN=2048
+        - LLM_TEMPERATURE=0.2
+        - MAX_CONTEXT_TOKENS=8192
+        - RESERVED_FOR_COMPLETION=1024
       ports:
         - "7860:7860"  # Gradio по умолчанию слушает 7860
       command: python -m ui.app  # 👈 запуск Gradio-приложения
