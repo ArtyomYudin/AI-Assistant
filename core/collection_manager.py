@@ -9,10 +9,12 @@ CollectionManager — модуль, который:
 
 Используется RAGCore, MilvusManager, твой embedder и сплиттеры.
 """
-
+import base64
+import json
 import logging
 from pathlib import Path
 from typing import List, Dict, Optional
+import redis
 
 import numpy as np
 from langchain_core.documents import Document
@@ -21,6 +23,8 @@ from core.milvus_manager import MilvusManager
 
 logger = logging.getLogger(__name__)
 
+REDIS_ROUTER_KEY = "router_state"     # хранит структуру роутера
+REDIS_EMB_PREFIX = "router_emb_"      # префикс для векторов коллекций
 
 # ==============================
 # ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ
@@ -105,8 +109,16 @@ class CollectionManager:
         """
         self.core = core
         self.router: Optional[CollectionRouter] = None
-        self.collections: dict[str, MilvusManager] = {}  # имена коллекций -> менеджеры Milvus
-
+        # self.collections: dict[str, MilvusManager] = {}  # имена коллекций -> менеджеры Milvus
+        self.collections: List[str] = []  # имена коллекций
+        self.redis = redis.StrictRedis(
+            host=self.core.config.REDIS_HOST,
+            port=self.core.config.REDIS_PORT,
+            db= 0,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+        )
     # ----------------------------------------------------------
     # Загрузка коллекций с диска и индексирование
     # ----------------------------------------------------------
@@ -126,7 +138,7 @@ class CollectionManager:
 
         for folder in subdirs:
             cname = folder.name
-            logger.info("📂 Индексация коллекции: %s", cname)
+            logger.info("Индексация коллекции: %s", cname)
 
             docs = self.core.load_documents(str(folder))
             if not docs:
@@ -134,6 +146,10 @@ class CollectionManager:
                 continue
 
             await self._index_collection(cname, docs)
+            self.collections.append(cname)
+
+        # сохраняем имена коллекций
+        self._save_router_state()
 
     # ----------------------------------------------------------
     # Реальная индексация документов в коллекцию Milvus
@@ -199,8 +215,17 @@ class CollectionManager:
 
     async def build_router(self):
         """
-        Создаёт router: embedding каждой коллекции.
+        Если в Redis есть сохранённый роутер — восстанавливаем.
+        Иначе — строим с нуля и сохраняем.
         """
+
+        restored = self._load_router_state()
+        if restored:
+            logger.info("Роутер восстановлен из Redis")
+            self.router = restored
+            return
+
+        logger.info("Роутер отсутствует — создаём заново")
 
         root = Path(self.core.config.DATA_DIR)
         subdirs = [p for p in root.iterdir() if p.is_dir()]
@@ -217,7 +242,9 @@ class CollectionManager:
                 docs, self.core.embeddings.embed_query
             )
             embeddings[name] = centroid
+            self._save_collection_vector(name, centroid)
 
+        self.collections = list(embeddings.keys())
         self.router = CollectionRouter(embeddings)
         logger.info("Маршрутизатор создан: %d коллекций", len(embeddings))
 
@@ -258,3 +285,48 @@ class CollectionManager:
             collection_name=cname,
             reranker_endpoint=self.core.config.RERANKER_BASE_URL,
         )
+
+    # ---------------------------------------------------------
+    # Redis: сохранение состояния
+    # ---------------------------------------------------------
+
+    def _save_router_state(self):
+        state = {"collections": self.collections}
+        self.redis.set(REDIS_ROUTER_KEY, json.dumps(state).encode("utf-8"))
+
+    def _load_router_state(self) -> Optional[CollectionRouter]:
+        raw = self.redis.get(REDIS_ROUTER_KEY)
+        if not raw:
+            return None
+
+        state = json.loads(raw)
+        collections = state.get("collections", [])
+
+        embeddings = {}
+
+        for cname in collections:
+            vec = self._load_collection_vector(cname)
+            if vec is None:
+                return None
+            embeddings[cname] = vec
+
+        return CollectionRouter(embeddings)
+
+    # ---------------------------------------------------------
+    # Redis: embedding-векторы
+    # ---------------------------------------------------------
+
+    def _save_collection_vector(self, name: str, vec: np.ndarray):
+        key = f"{REDIS_EMB_PREFIX}{name}"
+        data = base64.b64encode(vec.astype(np.float32).tobytes())
+        self.redis.set(key, data)
+
+    def _load_collection_vector(self, name: str) -> Optional[np.ndarray]:
+        key = f"{REDIS_EMB_PREFIX}{name}"
+        raw = self.redis.get(key)
+        if not raw:
+            return None
+
+        arr = np.frombuffer(base64.b64decode(raw), dtype=np.float32).copy()
+        arr /= np.linalg.norm(arr)
+        return arr
