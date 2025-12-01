@@ -107,7 +107,7 @@ async def test_answer_stream(message, keywords_csv, history, session_id="gradio-
 with gr.Blocks(title="RAG — Streaming UI") as demo:
     gr.Markdown("## 🔎 RAG QA (Streaming)")
     with gr.Tab("Диалог"):
-        chat = gr.ChatInterface(fn=chat_answer_stream, type="messages", title="QA")
+        chat = gr.ChatInterface(fn=chat_answer_stream, title="QA")
         # # при загрузке UI — подтягиваем Redis-историю
         # demo.load(lambda: load_history("gradio"), None, chat.chatbot)
     with gr.Tab("Тестовый вопрос"):
