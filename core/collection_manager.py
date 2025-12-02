@@ -111,6 +111,7 @@ class CollectionManager:
         self.router: Optional[CollectionRouter] = None
         # self.collections: dict[str, MilvusManager] = {}  # имена коллекций -> менеджеры Milvus
         self.collections: List[str] = []  # имена коллекций
+        # self.last_used_collection: Optional[str] = None
         self.redis = redis.StrictRedis(
             host=self.core.config.REDIS_HOST,
             port=self.core.config.REDIS_PORT,
@@ -209,6 +210,41 @@ class CollectionManager:
         await milvus.client.load_collection(collection_name)
         logger.info("Коллекция %s загружена в память.", collection_name)
 
+
+    def is_followup_query(self, query: str) -> bool:
+        """
+            Простая и надёжная эвристика follow-up:
+            - Если текст пустой -> False
+            - Возьмём первое слово (lowercase) и посмотрим, входит ли оно в набор уточняющих слов.
+            """
+        if not query:
+            return False
+
+        q = query.strip().lower().split()
+        if not q:
+            return False
+
+        first = q[0]
+
+        followup_first_words = {
+            "какие", "какая", "какой", "какои",  # опечатки/вариации
+            "ещё", "еще", "покажи", "покажите",
+            "а", "подробнее", "что", "чего"
+        }
+
+        # если первое слово — из списка уточняющих — считаем follow-up
+        if first in followup_first_words and len(q) <=2 :
+            return True
+
+        # короткие одно-словные вопросы, типа "какие?", "какие.", "какой?" — считаем follow-up
+        if len(q) == 1 and len(first) <= 6:
+            # но избегаем ловли одиночных слов, которые скорее самостоятельны:
+            standalone_no = {"да", "нет", "почему", "как"}
+            return first not in standalone_no
+
+        return False
+
+
     # ----------------------------------------------------------
     # Построение Collection Router
     # ----------------------------------------------------------
@@ -267,15 +303,40 @@ class CollectionManager:
     # Выполнить поиск с роутингом
     # ----------------------------------------------------------
 
-    async def routed_search(self, query: str):
+    async def routed_search(self, query: str, conversation_id: Optional[str] = None):
         """
-        Автоматически выбирает коллекцию и выполняет поиск в ней.
-        """
+                Автоматически выбирает коллекцию и выполняет поиск в ней.
+                conversation_id: опциональная id диалога/сессии; если None — используется "global".
+                """
 
-        cname = await self.route_query(query)
-        logger.info("Роутер выбрал коллекцию: %s", cname)
+        if conversation_id is None:
+            conversation_id = "global"
 
-        qvec = await self.core.embeddings.embed_query(query)
+        # если роутер ещё не создан — попробуем восстановить/построить
+        if not self.router:
+            try:
+                # попытка восстановить (если в Redis лежит), иначе пересоздать
+                await self.build_router()
+            except Exception as e:
+                logger.exception("Ошибка при создании роутера: %s", e)
+                raise
+
+        # Загружаем последнюю коллекцию из Redis (по conversation_id)
+        last = self.load_last_used_collection(conversation_id)
+
+        # Если follow-up и есть последняя коллекция — используем её
+        if last and self.is_followup_query(query):
+            cname = last
+            logger.info("Follow-up запрос (conv=%s) — использую прошлую коллекцию: %s", conversation_id, cname)
+        else:
+            # Иначе обычный routing
+            cname = await self.route_query(query)
+            logger.info("RAW QUERY: %s", query)
+            logger.info("Роутер выбрал коллекцию: %s", cname)
+            # Сохраняем выбор коллекции в Redis (по conversation_id)
+            self._save_last_used_collection(cname, conversation_id)
+
+        qvec = await self.core._get_embedding_cached(query)
 
         return await self.core.milvus.hybrid_search(
             query_text=query,
@@ -289,6 +350,14 @@ class CollectionManager:
     # ---------------------------------------------------------
     # Redis: сохранение состояния
     # ---------------------------------------------------------
+    def save_last_used_collection(self, name: str, session_id: str = "global"):
+        key = f"last_used_collection:{session_id}"
+        # Сохраняем как строку
+        self.redis.set(key, name)
+
+    def load_last_used_collection(self, session_id: str = "global") -> Optional[str]:
+        key = f"last_used_collection:{session_id}"
+        return self.redis.get(key)
 
     def _save_router_state(self):
         state = {"collections": self.collections}

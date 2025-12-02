@@ -286,16 +286,32 @@ class RAGCore:
         k = k or self.config.K
         fetch_k = fetch_k or self.config.FETCH_K
 
-        async def routed_retrieve(query: str) -> List[Document]:
+        async def routed_retrieve(query: str, session_id=None) -> List[Document]:
             if not query.strip():
                 return []
 
-            # Определяем коллекцию
-            collection_name = await self.collection_manager.route_query(query)
-            if not collection_name:
-                logger.warning("Не удалось определить коллекцию для запроса")
-                return []
-            logger.info("Роутер выбрал коллекцию: %s", collection_name)
+            # Загружаем последнюю коллекцию из Redis (по conversation_id)
+            last = self.collection_manager.load_last_used_collection(session_id="")
+
+            # Если follow-up и есть последняя коллекция — используем её
+            if last and self.collection_manager.is_followup_query(query):
+                collection_name = last
+                logger.info("Follow-up запрос (session_id=%s) — использую прошлую коллекцию: %s",  session_id, collection_name)
+            else:
+                # Иначе обычный routing
+                collection_name = await self.collection_manager.route_query(query)
+                logger.info("RAW QUERY: %s", query)
+                logger.info("Роутер выбрал коллекцию: %s", collection_name)
+                # Сохраняем выбор коллекции в Redis (по conversation_id)
+                self.collection_manager.save_last_used_collection(collection_name, session_id="")
+
+
+            # # Определяем коллекцию
+            # collection_name = await self.collection_manager.route_query(query)
+            # if not collection_name:
+            #     logger.warning("Не удалось определить коллекцию для запроса")
+            #     return []
+            # logger.info("Роутер выбрал коллекцию: %s", collection_name)
 
             # Проверяем и загружаем коллекцию
             if not await self.milvus.client.has_collection(collection_name):
@@ -492,7 +508,7 @@ class RAGCore:
             # Поиск документов (можно тоже обернуть в таск, если хочешь параллелить с чем-то ещё)
             search_start = time.time()
             try:
-                docs = await self.retriever(question)
+                docs = await self.retriever(question, session_id)
                 search_time = time.time() - search_start
                 logger.debug(f"[{session_id}] ✅ Найдено {len(docs)} документов за {search_time:.2f} сек")
                 # logger.info(f"BLA BLA BLA {docs}")

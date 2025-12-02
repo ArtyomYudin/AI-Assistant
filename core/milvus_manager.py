@@ -5,7 +5,7 @@ from langchain_core.documents import Document
 from pymilvus import AnnSearchRequest, DataType, Function, FunctionType, MilvusException
 from pymilvus.client.types import LoadState
 
-from core.utils import hash_text
+from core.utils import hash_text, remove_stopwords_russian
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -213,8 +213,9 @@ class MilvusManager:
             )
 
             # Поиск по sparse-вектору (BM25)
+            query_for_sparse = remove_stopwords_russian(query_text) # удаление стоп-слов
             req_sparse = AnnSearchRequest(
-                data = [query_text],
+                data = [query_for_sparse],
                 anns_field = "sparse_vector",
                 limit = fetch_k,
                 param = {"drop_ratio_search": 0.2}

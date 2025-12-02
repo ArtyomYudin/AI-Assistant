@@ -9,7 +9,6 @@ import config.rag_config
 
 _tokenizer = None
 
-
 def get_tokenizer():
     global _tokenizer
     if _tokenizer is None:
@@ -77,3 +76,13 @@ def get_current_user(authorization: str = Header(...)):
         return payload.get("sub")
     except (JWTError, ValueError):
         raise HTTPException(status_code=401, detail="Invalid token")
+
+def remove_stopwords_russian(text: str) -> str:
+    """Удаляет стоп-слова из текста для BM25-поиска."""
+    if not text:
+        return ""
+    # Приводим к нижнему регистру и разбиваем на слова
+    words = re.findall(r"\b\w+\b", text.lower())
+    # Фильтруем
+    filtered = [w for w in words if w not in config.rag_config.RUSSIAN_STOPWORDS]
+    return " ".join(filtered)
