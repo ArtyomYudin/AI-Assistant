@@ -10,8 +10,9 @@ from config.rag_config import RAGConfig
 from core.chat_history import RedisChatHistory
 from core.document_loader import load_documents_from_directory
 from core.milvus_manager import MilvusManager
+from core.polite_detector import PoliteDetector
 from core.splitters import SplitterManager
-from core.utils import count_tokens, truncate_text_by_tokens
+from core.utils import count_tokens, truncate_text_by_tokens, is_greeting_or_thanks
 from core.embedding_cache import RedisEmbeddingCache
 from core.collection_manager import CollectionManager
 
@@ -461,6 +462,14 @@ class RAGCore:
                 yield {
                     "type": "response",  # или "message"
                     "text": "Пожалуйста, задайте вопрос."
+                }
+                return
+
+            # Проверяем вежливые/служебные фразы
+            if PoliteDetector.is_polite(question):
+                yield {
+                    "type": "response",
+                    "text": PoliteDetector.reply(question)
                 }
                 return
 
