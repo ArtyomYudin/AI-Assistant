@@ -4,7 +4,8 @@ import time
 from typing import List, Optional
 
 from langchain_core.documents import Document
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
+from transformers import TFOpenAIGPTDoubleHeadsModel
 
 from config.rag_config import RAGConfig
 from core.chat_history import RedisChatHistory
@@ -443,6 +444,29 @@ class RAGCore:
         else:
             raise ValueError(f"Неизвестный режим: {mode}")
 
+    def _build_messages(self, mode: str, question: str, context: str, history: List[BaseMessage]) -> List[BaseMessage]:
+        """
+        Собирает структурированный список сообщений для ChatModel.
+        """
+        #TODO
+        # добавить зависимость от режима работы RAG
+
+        # Системное сообщение — ТОЛЬКО правила (без {context}!)
+
+        messages: List[BaseMessage] = [SystemMessage(content=self.config.QA_PROMPT_HYBRID_RU_SYSTEM)]
+
+        # Добавляем контекст как первое user-сообщение
+        if context.strip():
+            messages.append(HumanMessage(content=f"Контекст:\n{context}"))
+
+        # Добавляем историю
+        messages.extend(history)
+
+        # Добавляем текущий вопрос
+        messages.append(HumanMessage(content=question))
+
+        return messages
+
     def create_qa_generator(self) -> None:
         """
         Создаёт генератор Q&A:
@@ -582,12 +606,21 @@ class RAGCore:
                 return
 
             # Генерация ответа LLM
-            prompt = self._build_prompt(
+            history = self.get_history(session_id).get_messages()  # это список BaseMessage
+            messages = self._build_messages(
                 mode=self.config.MODE,
                 question=question,
                 context=context,
-                history_text=history_text
+                history=history
             )
+
+            # prompt = self._build_prompt(
+            #     mode=self.config.MODE,
+            #     question=question,
+            #     context=context,
+            #     history_text=history_text
+            # )
+
 
             full = ""
             buffer = ""
@@ -598,7 +631,8 @@ class RAGCore:
                 first_token_received = False
                 token_count = 0
 
-                async for chunk in self.llm.astream([{"role": "user", "content": prompt}]):
+                async for chunk in self.llm.astream(messages):
+                # async for chunk in self.llm.astream([{"role": "user", "content": prompt}]):
                     if content := chunk.content:
                         if not first_token_received:
                             first_token_time = time.time() - llm_start
