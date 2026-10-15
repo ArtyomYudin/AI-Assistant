@@ -14,6 +14,8 @@ services:
       --port 8001
       --served-model-name Qwen3-8B-AWQ
     environment:
+      - HSA_OVERRIDE_GFX_VERSION=9.0.6    # КРИТИЧНО ДЛЯ MI50
+      - ROCR_VISIBLE_DEVICES=0            # Родной синтаксис ROCm
       - CUDA_VISIBLE_DEVICES=0
     ports:
       - "8001:8001"
@@ -75,6 +77,8 @@ services:
     cap_add:
       - SYS_PTRACE
     environment:
+      - HSA_OVERRIDE_GFX_VERSION=9.0.6    # КРИТИЧНО ДЛЯ MI50
+      - ROCR_VISIBLE_DEVICES=1
       - HIP_VISIBLE_DEVICES=1
       - CUDA_VISIBLE_DEVICES=1
       - MODEL_NAME=ai-forever/FRIDA
@@ -94,12 +98,14 @@ services:
       --swap-space 4
       --disable-log-requests
       --dtype float16
-      --gpu-memory-utilization=0.55
+      --gpu-memory-utilization=0.35
       --max-num-batched-tokens 8192
-      --max-num-seqs 32
+      --max-num-seqs 16
       --port 8002
       --served-model-name bge-reranker-v2-m3
     environment:
+      - HSA_OVERRIDE_GFX_VERSION=9.0.6    # КРИТИЧНО ДЛЯ MI50
+      - ROCR_VISIBLE_DEVICES=1
       - CUDA_VISIBLE_DEVICES=1
       - VLLM_USE_V1=0
       - VLLM_USE_TRITON_FLASH_ATTN=0
@@ -132,7 +138,7 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET_NAME=milvus
-      - MQ_TYPE=woodpecker
+      - MQ_TYPE=rocksmq                   # СТАБИЛЬНЕЕ ДЛЯ STANDALONE (вместно woodpecker)
     command: ["milvus", "run", "standalone"]
     security_opt:
       - seccomp:unconfined
@@ -219,6 +225,11 @@ services:
       - "8008:8008"
     command: >
       uvicorn api.app:app --host 0.0.0.0 --port 8008 --log-level debug
+    depends_on:
+      - llm
+      - frida-embeddings
+      - reranker
+      - redis
 
   # Gradio UI
   rag-gradio:
@@ -239,6 +250,6 @@ services:
         - RESERVED_FOR_COMPLETION=1024
       ports:
         - "7860:7860"  # Gradio по умолчанию слушает 7860
-      command: python -m ui.app  # 👈 запуск Gradio-приложения
+      command: python -m ui.app  # запуск Gradio-приложения
       depends_on:
         - rag-api
