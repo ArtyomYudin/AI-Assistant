@@ -98,9 +98,9 @@ services:
       --swap-space 4
       --disable-log-requests
       --dtype float16
-      --gpu-memory-utilization=0.30
-      --max-num-batched-tokens 8192
-      --max-num-seqs 128
+      --gpu-memory-utilization=0.35
+      --max-num-batched-tokens 32768
+      --max-num-seqs 512
       --port 8002
       --served-model-name bge-reranker-v2-m3
     environment:
