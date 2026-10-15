@@ -48,8 +48,8 @@ class RAGConfig(BaseSettings):
     INDEX_BATCH_SIZE: int = 100
 
     # Retrieval
-    K: int = 20  # Сколько документов пойдет в Qwen после реранкера
-    FETCH_K: int = 50  # Сколько документов Milvus достает изначально для оценки реранкером
+    K: int = 7  # Сколько документов пойдет в Qwen после реранкера
+    FETCH_K: int = 20  # Сколько документов Milvus достает изначально для оценки реранкером
 
     # Reranker
     RERANKER_BASE_URL: str = "http://172.20.4.50:8002/v1/rerank"
