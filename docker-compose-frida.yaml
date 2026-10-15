@@ -5,10 +5,10 @@ services:
     container_name: llm
     command: >
       vllm serve /models/Qwen/Qwen3-8B-AWQ
-      --gpu-memory-utilization 0.85
-      --max-model-len 12000
-      --max-num-batched-tokens 12000
-      --max-num-seqs 16
+      --gpu-memory-utilization 0.90
+      --max-model-len 8192
+      --max-num-batched-tokens 8192
+      --max-num-seqs 32
       --enable-prefix-caching
       --disable-log-requests
       --port 8001
@@ -98,9 +98,9 @@ services:
       --swap-space 4
       --disable-log-requests
       --dtype float16
-      --gpu-memory-utilization=0.35
+      --gpu-memory-utilization=0.30
       --max-num-batched-tokens 8192
-      --max-num-seqs 16
+      --max-num-seqs 128
       --port 8002
       --served-model-name bge-reranker-v2-m3
     environment:
