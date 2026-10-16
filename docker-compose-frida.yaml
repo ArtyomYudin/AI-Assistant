@@ -118,7 +118,6 @@ services:
       --served-model-name bge-reranker-v2-m3
     environment:
       - HSA_OVERRIDE_GFX_VERSION=9.0.6    # КРИТИЧНО ДЛЯ MI50
-      - ROCR_VISIBLE_DEVICES=1
       - CUDA_VISIBLE_DEVICES=1
       - VLLM_USE_V1=0
       - VLLM_USE_TRITON_FLASH_ATTN=0
