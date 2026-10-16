@@ -150,7 +150,7 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET_NAME=milvus
-      - MQ_TYPE=rocksmq                   # СТАБИЛЬНЕЕ ДЛЯ STANDALONE (вместно woodpecker)
+      - MQ_TYPE=woodpecker
     command: ["milvus", "run", "standalone"]
     security_opt:
       - seccomp:unconfined
