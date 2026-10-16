@@ -3,16 +3,28 @@ services:
   llm:
     image: nalanzeyu/vllm-gfx906
     container_name: llm
+#    command: >
+#      vllm serve /models/Qwen/Qwen3-8B-AWQ
+#      --gpu-memory-utilization 0.90
+#      --max-model-len 16384
+#      --max-num-batched-tokens 16384
+#      --max-num-seqs 32
+#      --enable-prefix-caching
+#      --disable-log-requests
+#      --port 8001
+#      --served-model-name Qwen3-8B-AWQ
     command: >
-      vllm serve /models/Qwen/Qwen3-8B-AWQ
+      vllm serve /models/pimenovdv/T-lite-it-2.1-AWQ-4bits
       --gpu-memory-utilization 0.90
-      --max-model-len 8192
-      --max-num-batched-tokens 8192
+      --max-model-len 16384
+      --max-num-batched-tokens 16384
       --max-num-seqs 32
       --enable-prefix-caching
       --disable-log-requests
       --port 8001
-      --served-model-name Qwen3-8B-AWQ
+      --served-model-name T-lite-it-2.1-AWQ
+      --enable-auto-tool-choice
+      --tool-call-parser hermes
     environment:
       - HSA_OVERRIDE_GFX_VERSION=9.0.6    # КРИТИЧНО ДЛЯ MI50
       - ROCR_VISIBLE_DEVICES=0            # Родной синтаксис ROCm
@@ -95,6 +107,7 @@ services:
     container_name: reranker
     command: >
       vllm serve /models/BAAI/bge-reranker-v2-m3
+      --task score
       --swap-space 4
       --disable-log-requests
       --dtype float16
@@ -219,8 +232,8 @@ services:
       - MAX_HISTORY_MESSAGES=1
       - LLM_MAX_TOKEN=2048
       - LLM_TEMPERATURE=0.2
-      - MAX_CONTEXT_TOKENS=8192
-      - RESERVED_FOR_COMPLETION=1024
+      - MAX_CONTEXT_TOKENS=14336
+      - RESERVED_FOR_COMPLETION=2048
     ports:
       - "8008:8008"
     command: >
@@ -246,8 +259,8 @@ services:
         - MAX_HISTORY_MESSAGES=1
         - LLM_MAX_TOKEN=2048
         - LLM_TEMPERATURE=0.2
-        - MAX_CONTEXT_TOKENS=8192
-        - RESERVED_FOR_COMPLETION=1024
+        - MAX_CONTEXT_TOKENS=14336
+        - RESERVED_FOR_COMPLETION=2048
       ports:
         - "7860:7860"  # Gradio по умолчанию слушает 7860
       command: python -m ui.app  # запуск Gradio-приложения

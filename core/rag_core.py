@@ -288,24 +288,26 @@ class RAGCore:
         k = k or self.config.K
         fetch_k = fetch_k or self.config.FETCH_K
 
-        async def routed_retrieve(query: str, session_id=None) -> List[Document]:
+        async def routed_retrieve(query: str, session_id: str | None = None) -> List[Document]:
             if not query.strip():
                 return []
 
+            sid = session_id or "global"
+
             # Загружаем последнюю коллекцию из Redis (по conversation_id)
-            last = self.collection_manager.load_last_used_collection(session_id="")
+            last = self.collection_manager.load_last_used_collection(session_id=sid)
 
             # Если follow-up и есть последняя коллекция — используем её
             if last and self.collection_manager.is_followup_query(query):
                 collection_name = last
-                logger.info("Follow-up запрос (session_id=%s) — использую прошлую коллекцию: %s",  session_id, collection_name)
+                logger.info("Follow-up запрос (sid=%s) — использую прошлую коллекцию: %s",  sid, collection_name)
             else:
                 # Иначе обычный routing
                 collection_name = await self.collection_manager.route_query(query)
                 logger.info("RAW QUERY: %s", query)
                 logger.info("Роутер выбрал коллекцию: %s", collection_name)
                 # Сохраняем выбор коллекции в Redis (по conversation_id)
-                self.collection_manager.save_last_used_collection(collection_name, session_id="")
+                self.collection_manager.save_last_used_collection(collection_name, session_id=sid)
 
 
             # # Определяем коллекцию

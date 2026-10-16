@@ -15,8 +15,8 @@ logging.basicConfig(
 from contextlib import asynccontextmanager
 from typing import List, Optional, AsyncGenerator
 
-from fastapi import FastAPI, Body, Query, Depends, Request
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi import FastAPI, Query, Depends, Request
+from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
@@ -74,6 +74,7 @@ class TestRequest(BaseModel):
     expected_keywords: List[str] = Field(default_factory=list)
     session_id: Optional[str] = "test"
 
+# noinspection PyTypeChecker
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # или ["http://localhost:4200"]
