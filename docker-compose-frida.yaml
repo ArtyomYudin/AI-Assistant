@@ -242,6 +242,7 @@ services:
       - frida-embeddings
       - reranker
       - redis
+      - milvus
 
   # Gradio UI
   rag-gradio:

@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from langchain_core.documents import Document
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
-from transformers import TFOpenAIGPTDoubleHeadsModel
+# from transformers import TFOpenAIGPTDoubleHeadsModel
 
 from config.rag_config import RAGConfig
 from core.chat_history import RedisChatHistory
