@@ -103,12 +103,12 @@ services:
 
   # === BGE Reranker на GPU1 ===
   reranker:
-    image: nalanzeyu/vllm-gfx906:v0.10.1.update2-rocm6.3
+#    image: nalanzeyu/vllm-gfx906:v0.10.1.update2-rocm6.3
+    image: nalanzeyu/vllm-gfx906
     container_name: reranker
     command: >
       vllm serve /models/BAAI/bge-reranker-v2-m3
       --runner pooling
-      --task score
       --swap-space 4
       --disable-log-requests
       --dtype float16
