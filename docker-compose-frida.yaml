@@ -108,6 +108,7 @@ services:
     command: >
       vllm serve /models/BAAI/bge-reranker-v2-m3
       --task score
+      --pooler-config.task classify
       --swap-space 4
       --disable-log-requests
       --dtype float16
@@ -230,8 +231,8 @@ services:
       - MODE=hybrid
       - MAX_HISTORY_MESSAGES=1
       - LLM_MAX_TOKEN=2048
-      - LLM_TEMPERATURE=0.2
-      - MAX_CONTEXT_TOKENS=14336
+      - LLM_TEMPERATURE=0.7
+      - MAX_CONTEXT_TOKENS=12800
       - RESERVED_FOR_COMPLETION=2048
     ports:
       - "8008:8008"
@@ -258,8 +259,8 @@ services:
         - MODE=hybrid
         - MAX_HISTORY_MESSAGES=1
         - LLM_MAX_TOKEN=2048
-        - LLM_TEMPERATURE=0.2
-        - MAX_CONTEXT_TOKENS=14336
+        - LLM_TEMPERATURE=0.7
+        - MAX_CONTEXT_TOKENS=12800
         - RESERVED_FOR_COMPLETION=2048
       ports:
         - "7860:7860"  # Gradio по умолчанию слушает 7860
