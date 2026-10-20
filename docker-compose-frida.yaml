@@ -202,6 +202,12 @@ services:
     command: ["milvus", "run", "standalone"]
     security_opt:
       - seccomp:unconfined
+    deploy:
+      resources:
+        limits:
+          memory: 16g
+        reservations:
+          memory: 4g
     ports:
       - "19530:19530"   # gRPC
       - "9091:9091"     # REST
@@ -217,7 +223,7 @@ services:
       milvus-volume-init:
         condition: service_completed_successfully
       etcd:
-        condition: service_started
+        condition: service_healthy
       minio:
         condition: service_started
 
@@ -232,9 +238,9 @@ services:
     command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
     healthcheck:
       test: [ "CMD", "etcdctl", "endpoint", "health" ]
-      interval: 30s
-      timeout: 20s
-      retries: 3
+      interval: 5s
+      timeout: 3s
+      retries: 5
     ports:
       - "2379:2379"
     volumes:
