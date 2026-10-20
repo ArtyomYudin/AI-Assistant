@@ -107,7 +107,9 @@ services:
     container_name: reranker
     command: >
       vllm serve /models/BAAI/bge-reranker-v2-m3
-      --hf-overrides '{"architectures": ["XLMRobertaForSequenceClassification"]}'
+      --runner pooling
+      --hf-overrides '{"architectures": ["XLMRobertaModel"]}'
+      --override-pooler-config '{"pooling_type": "LAST"}'
       --swap-space 4
       --disable-log-requests
       --dtype float16
