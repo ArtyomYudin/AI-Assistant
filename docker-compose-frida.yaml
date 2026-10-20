@@ -103,7 +103,7 @@ services:
 
   # === BGE Reranker на GPU1 ===
   reranker:
-    image: nalanzeyu/vllm-gfx906 #:v0.10.1.update2-rocm6.3
+    image: nalanzeyu/vllm-gfx906:v0.10.1.update2-rocm6.3
     container_name: reranker
     command: >
       vllm serve /models/BAAI/bge-reranker-v2-m3
@@ -116,7 +116,6 @@ services:
       --max-num-seqs 512
       --port 8002
       --served-model-name bge-reranker-v2-m3
-      --chat-template ""
     environment:
       - HSA_OVERRIDE_GFX_VERSION=9.0.6    # КРИТИЧНО ДЛЯ MI50
       - CUDA_VISIBLE_DEVICES=1
