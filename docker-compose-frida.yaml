@@ -109,6 +109,7 @@ services:
       vllm serve /models/BAAI/bge-reranker-v2-m3
       --task score
       --enforce-eager
+      --override-pooler-config '{"use_activation": true}'
       --swap-space 4
       --disable-log-requests
       --dtype float16
