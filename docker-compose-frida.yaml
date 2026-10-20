@@ -196,18 +196,16 @@ services:
     container_name: milvus
     restart: unless-stopped
     environment:
-      MINIO_REGION: us-east-1
-      ETCD_ENDPOINTS: etcd:2379
-      MINIO_ADDRESS: minio:9000
+      - MINIO_REGION=us-east-1
+      - ETCD_ENDPOINTS=etcd:2379
+      - MINIO_ADDRESS=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET_NAME=milvus
+      - MQ_TYPE=woodpecker
     command: ["milvus", "run", "standalone"]
     security_opt:
       - seccomp:unconfined
-    deploy:
-      resources:
-        limits:
-          memory: 16g
-        reservations:
-          memory: 4g
     ports:
       - "19530:19530"   # gRPC
       - "9091:9091"     # REST
