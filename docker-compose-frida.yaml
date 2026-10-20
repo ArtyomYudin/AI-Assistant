@@ -102,55 +102,26 @@ services:
       uvicorn server:app --host 0.0.0.0 --port 8000
 
   # === BGE Reranker на GPU1 ===
-#  reranker:
-#    image: nalanzeyu/vllm-gfx906:v0.10.1.update2-rocm6.3
-#    container_name: reranker
-#    command: >
-#      vllm serve /models/BAAI/bge-reranker-v2-m3
-#      --runner pooling
-#      --override-pooler-config '{"softmax": true}'
-#      --swap-space 4
-#      --disable-log-requests
-#      --dtype float16
-#      --gpu-memory-utilization=0.35
-#      --max-num-batched-tokens 32768
-#      --max-num-seqs 512
-#      --port 8002
-#      --served-model-name bge-reranker-v2-m3
-#    environment:
-#      - HSA_OVERRIDE_GFX_VERSION=9.0.6    # КРИТИЧНО ДЛЯ MI50
-#      - CUDA_VISIBLE_DEVICES=1
-#      - VLLM_USE_V1=0
-#      - VLLM_USE_TRITON_FLASH_ATTN=0
-#    ports:
-#      - "8002:8002"
-#    volumes:
-#      - /storage/models:/models
-#    shm_size: "16g"
-#    ipc: host
-#    devices:
-#      - /dev/kfd
-#      - /dev/dri
-#    group_add:
-#      - video
-#    cap_add:
-#      - SYS_PTRACE
-#    security_opt:
-#      - seccomp=unconfined
-#      - apparmor=unconfined
-
   reranker:
-    image: michaelf34/infinity:0.0.70-amd # Официальный легковесный образ с поддержкой ROCm
+    image: nalanzeyu/vllm-gfx906:v0.10.1.update2-rocm6.3
     container_name: reranker
     command: >
-      v2
-      --model-id /models/BAAI/bge-reranker-v2-m3
-      --port 8002
-      --batch-size 32
+      vllm serve /models/BAAI/bge-reranker-v2-m3
+      --runner pooling
+      --pooler-config '{"pooling_type":"CLS"}
+      --swap-space 4
+      --disable-log-requests
       --dtype float16
+      --gpu-memory-utilization=0.35
+      --max-num-batched-tokens 32768
+      --max-num-seqs 512
+      --port 8002
+      --served-model-name bge-reranker-v2-m3
     environment:
-      - HSA_OVERRIDE_GFX_VERSION=9.0.6 # Важнейший флаг для MI50 остается
+      - HSA_OVERRIDE_GFX_VERSION=9.0.6    # КРИТИЧНО ДЛЯ MI50
       - CUDA_VISIBLE_DEVICES=1
+      - VLLM_USE_V1=0
+      - VLLM_USE_TRITON_FLASH_ATTN=0
     ports:
       - "8002:8002"
     volumes:
@@ -167,6 +138,35 @@ services:
     security_opt:
       - seccomp=unconfined
       - apparmor=unconfined
+
+#  reranker:
+#    image: michaelf34/infinity:0.0.70-amd # Официальный легковесный образ с поддержкой ROCm
+#    container_name: reranker
+#    command: >
+#      v2
+#      --model-id /models/BAAI/bge-reranker-v2-m3
+#      --port 8002
+#      --batch-size 32
+#      --dtype float16
+#    environment:
+#      - HSA_OVERRIDE_GFX_VERSION=9.0.6 # Важнейший флаг для MI50 остается
+#      - CUDA_VISIBLE_DEVICES=1
+#    ports:
+#      - "8002:8002"
+#    volumes:
+#      - /storage/models:/models
+#    shm_size: "16g"
+#    ipc: host
+#    devices:
+#      - /dev/kfd
+#      - /dev/dri
+#    group_add:
+#      - video
+#    cap_add:
+#      - SYS_PTRACE
+#    security_opt:
+#      - seccomp=unconfined
+#      - apparmor=unconfined
 
 
 # === Milvus (Vector DB) ===
