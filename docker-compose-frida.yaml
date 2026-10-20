@@ -107,7 +107,7 @@ services:
     container_name: reranker
     command: >
       vllm serve /models/BAAI/bge-reranker-v2-m3
-      --pooler-pooling-type CLS
+      --runner pooling
       --enforce-eager
       --swap-space 4
       --disable-log-requests
