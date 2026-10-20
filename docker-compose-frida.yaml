@@ -110,7 +110,6 @@ services:
       --enforce-eager
       --swap-space 4
       --disable-log-requests
-      --dtype float16
       --gpu-memory-utilization=0.35
       --max-num-batched-tokens 32768
       --max-num-seqs 512
