@@ -111,9 +111,9 @@ services:
       - "8002:8002"
     environment:
       - HSA_OVERRIDE_GFX_VERSION=9.0.6    # КРИТИЧНО ДЛЯ MI50
-      - ROCR_VISIBLE_DEVICES=1
+#      - ROCR_VISIBLE_DEVICES=1
       - HIP_VISIBLE_DEVICES=1
-      - CUDA_VISIBLE_DEVICES=1
+#      - CUDA_VISIBLE_DEVICES=1
       - HF_HUB_OFFLINE=1
       - TRANSFORMERS_OFFLINE=1
       - PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
