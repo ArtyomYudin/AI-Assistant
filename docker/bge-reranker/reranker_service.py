@@ -63,3 +63,7 @@ async def rerank(req: RerankRequest):
         for i, score in enumerate(scores)
     ]
     return {"results": sorted(results, key=lambda x: x["relevance_score"], reverse=True)}
+
+@app.post("/rerank")
+async def rerank_alias(request: RerankRequest):
+    return await rerank(request)
