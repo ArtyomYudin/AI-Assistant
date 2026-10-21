@@ -22,6 +22,7 @@ model = CrossEncoder(
     MODEL_PATH,
     device="cuda",       # после изоляции HIP_VISIBLE_DEVICES=1 это GPU1
     max_length=8192,
+    model_kwargs={"torch_dtype": torch.float16},
 )
 
 class RerankRequest(BaseModel):
@@ -31,7 +32,7 @@ class RerankRequest(BaseModel):
 @app.post("/v1/rerank")
 async def rerank(req: RerankRequest):
     pairs = [[req.query, doc] for doc in req.documents]
-    scores = model.predict(pairs, batch_size=8)
+    scores = model.predict(pairs, batch_size=64)
     results = [
         {"index": i, "relevance_score": float(score)}
         for i, score in enumerate(scores)
