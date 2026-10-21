@@ -107,20 +107,20 @@ services:
     container_name: reranker
     command: >
       vllm serve /models/BAAI/bge-reranker-v2-m3
-      --task score
+      --pooler-config.task classify
       --enforce-eager
       --swap-space 4
       --disable-log-requests
       --gpu-memory-utilization=0.35
       --max-num-batched-tokens 32768
       --max-num-seqs 512
-      --dtype float32
+      --dtype float16
       --port 8002
       --served-model-name bge-reranker-v2-m3
     environment:
       - HSA_OVERRIDE_GFX_VERSION=9.0.6    # КРИТИЧНО ДЛЯ MI50
       - CUDA_VISIBLE_DEVICES=1
-      - VLLM_USE_V1=0
+      - VLLM_USE_V1=1
       - VLLM_USE_TRITON_FLASH_ATTN=0
     ports:
       - "8002:8002"
