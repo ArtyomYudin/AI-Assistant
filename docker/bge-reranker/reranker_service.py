@@ -6,7 +6,13 @@ from pydantic import BaseModel
 from sentence_transformers import CrossEncoder
 
 # Диагностика: должно быть "Visible GPUs: 1, current: 0"
-print(f"Visible GPUs: {torch.cuda.device_count()}, current: {torch.cuda.current_device()}")
+print(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
+print(f"torch.version.hip: {torch.version.hip}")
+if torch.cuda.is_available():
+    print(f"Visible GPUs: {torch.cuda.device_count()}")
+    print(f"Device name: {torch.cuda.get_device_name(0)}")
+else:
+    print("No GPU visible to PyTorch. Check devices and HIP_VISIBLE_DEVICES.")
 
 app = FastAPI()
 
