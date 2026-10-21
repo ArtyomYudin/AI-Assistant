@@ -170,7 +170,7 @@ services:
 
 # === Milvus (Vector DB) ===
   milvus-volume-init:
-    image: milvusdb/milvus:v3.0.2
+    image: milvusdb/milvus:v3.0.3
     user: "0:0"
     network_mode: none
     read_only: true
@@ -192,7 +192,7 @@ services:
       - /storage/milvus:/var/lib/milvus
 
   milvus:
-    image: milvusdb/milvus:v3.0.2
+    image: milvusdb/milvus:v3.0.3
     container_name: milvus
     restart: unless-stopped
     environment:
