@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 import torch
 from typing import List
 
@@ -14,7 +16,6 @@ if torch.cuda.is_available():
 else:
     print("No GPU visible to PyTorch. Check devices and HIP_VISIBLE_DEVICES.")
 
-app = FastAPI()
 
 MODEL_PATH = "/models/BAAI/bge-reranker-v2-m3"
 
@@ -30,6 +31,28 @@ model.model.half()
 class RerankRequest(BaseModel):
     query: str
     documents: List[str]
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- Код при старте (Startup) ---
+    print("Reranker warming up...")
+    warmup_pairs = [
+        ["есть ли камеры на втором этаже?", "Камеры второго этажа: левое крыло, правое крыло"],
+    ]
+    with torch.inference_mode():
+        model.predict(warmup_pairs, batch_size=1)
+        model.predict(warmup_pairs, batch_size=1)  # Второй прогон для горячего кэша
+    print("Reranker warmed up and ready.")
+
+    yield  # <-- Здесь приложение начинает принимать запросы
+
+    # --- Код при остановке (Shutdown) ---
+    # Здесь можно освободить ресурсы, если нужно
+    print("Reranker shutting down.")
+
+# Передаём lifespan в FastAPI вместо @app.on_event
+app = FastAPI(title="Reranker API", lifespan=lifespan)
 
 @app.post("/v1/rerank")
 async def rerank(req: RerankRequest):
