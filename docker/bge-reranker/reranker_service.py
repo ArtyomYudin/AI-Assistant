@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sentence_transformers import CrossEncoder
 
 # Диагностика: должно быть "Visible GPUs: 1, current: 0"
-print(f"Visible GPUs: {torch.cuda.device_count()}, current: {torch.cuda.current_device()}")
+# print(f"Visible GPUs: {torch.cuda.device_count()}, current: {torch.cuda.current_device()}")
 
 app = FastAPI()
 
