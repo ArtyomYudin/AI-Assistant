@@ -114,7 +114,7 @@ services:
       --gpu-memory-utilization=0.35
       --max-num-batched-tokens 32768
       --max-num-seqs 512
-      --dtype float16
+      --dtype float32
       --port 8002
       --served-model-name bge-reranker-v2-m3
     environment:
