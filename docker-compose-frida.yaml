@@ -210,7 +210,7 @@ services:
       - "19530:19530"   # gRPC
       - "9091:9091"     # REST
     volumes:
-      - milvus.yaml:/milvus/configs/milvus.yaml
+      - ./milvus.yaml:/milvus/configs/milvus.yaml
       - /storage/milvus:/var/lib/milvus
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:9091/healthz" ]
