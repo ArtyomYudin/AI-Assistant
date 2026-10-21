@@ -199,10 +199,6 @@ services:
       - MINIO_REGION=us-east-1
       - ETCD_ENDPOINTS=etcd:2379
       - MINIO_ADDRESS=minio:9000
-      - MINIO_ACCESS_KEY=minioadmin
-      - MINIO_SECRET_KEY=minioadmin
-      - MINIO_BUCKET_NAME=milvus
-      - MQ_TYPE=woodpecker
     command: ["milvus", "run", "standalone"]
     security_opt:
       - seccomp:unconfined
@@ -214,6 +210,7 @@ services:
       - "19530:19530"   # gRPC
       - "9091:9091"     # REST
     volumes:
+      - milvus.yaml:/milvus/configs/milvus.yaml
       - /storage/milvus:/var/lib/milvus
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:9091/healthz" ]
