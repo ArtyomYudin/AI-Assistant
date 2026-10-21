@@ -103,31 +103,21 @@ services:
 
   # === BGE Reranker на GPU1 ===
   reranker:
-    image: nalanzeyu/vllm-gfx906:v0.10.1.update2-rocm6.3
+    build:
+      context: ./docker/bge-reranker
+      dockerfile: Dockerfile
     container_name: reranker
-    command: >
-      vllm serve /models/BAAI/bge-reranker-v2-m3
-      --runner pooling
-      --enforce-eager
-      --swap-space 4
-      --disable-log-requests
-      --gpu-memory-utilization=0.35
-      --max-num-batched-tokens 32768
-      --max-num-seqs 512
-      --dtype float16
-      --port 8002
-      --served-model-name bge-reranker-v2-m3
-    environment:
-      - HSA_OVERRIDE_GFX_VERSION=9.0.6    # КРИТИЧНО ДЛЯ MI50
-      - CUDA_VISIBLE_DEVICES=1
-      - VLLM_USE_V1=1
-      - VLLM_USE_TRITON_FLASH_ATTN=0
     ports:
       - "8002:8002"
+    environment:
+      - HIP_VISIBLE_DEVICES=1
+      - ROCR_VISIBLE_DEVICES=1
+      - HSA_OVERRIDE_GFX_VERSION=9.0.6
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
     volumes:
-      - /storage/models:/models
-    shm_size: "16g"
-    ipc: host
+      - /storage/models:/models:ro
     devices:
       - /dev/kfd
       - /dev/dri
@@ -138,6 +128,52 @@ services:
     security_opt:
       - seccomp=unconfined
       - apparmor=unconfined
+    shm_size: "16g"
+    ipc: host
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+#  reranker:
+#    image: nalanzeyu/vllm-gfx906:v0.10.1.update2-rocm6.3
+#    container_name: reranker
+#    command: >
+#      vllm serve /models/BAAI/bge-reranker-v2-m3
+#      --runner pooling
+#      --enforce-eager
+#      --swap-space 4
+#      --disable-log-requests
+#      --gpu-memory-utilization=0.35
+#      --max-num-batched-tokens 32768
+#      --max-num-seqs 512
+#      --dtype float16
+#      --port 8002
+#      --served-model-name bge-reranker-v2-m3
+#    environment:
+#      - HSA_OVERRIDE_GFX_VERSION=9.0.6    # КРИТИЧНО ДЛЯ MI50
+#      - CUDA_VISIBLE_DEVICES=1
+#      - VLLM_USE_V1=1
+#      - VLLM_USE_TRITON_FLASH_ATTN=0
+#    ports:
+#      - "8002:8002"
+#    volumes:
+#      - /storage/models:/models
+#    shm_size: "16g"
+#    ipc: host
+#    devices:
+#      - /dev/kfd
+#      - /dev/dri
+#    group_add:
+#      - video
+#    cap_add:
+#      - SYS_PTRACE
+#    security_opt:
+#      - seccomp=unconfined
+#      - apparmor=unconfined
 
 #  reranker:
 #    image: michaelf34/infinity:0.0.70-amd # Официальный легковесный образ с поддержкой ROCm
