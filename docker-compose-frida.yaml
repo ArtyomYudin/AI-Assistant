@@ -206,6 +206,10 @@ services:
     command: ["milvus", "run", "standalone"]
     security_opt:
       - seccomp:unconfined
+    deploy:
+      resources:
+        limits:
+          memory: 16g
     ports:
       - "19530:19530"   # gRPC
       - "9091:9091"     # REST
