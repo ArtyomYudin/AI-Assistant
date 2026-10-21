@@ -116,7 +116,6 @@ services:
 #      - CUDA_VISIBLE_DEVICES=1
       - HF_HUB_OFFLINE=1
       - TRANSFORMERS_OFFLINE=1
-      - PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
     volumes:
       - /storage/models:/models:ro
     devices:
