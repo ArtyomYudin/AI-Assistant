@@ -23,10 +23,10 @@ model = CrossEncoder(
     MODEL_PATH,
     device="cuda",       # после изоляции HIP_VISIBLE_DEVICES=1 это GPU1
     max_length=8192,
-    # model_kwargs={"torch_dtype": torch.float16},
+    automodel_args={"torch_dtype": torch.float16}
 )
-# Вместо model_kwargs={"torch_dtype": "float16"}:
-model.model.half()
+# # Вместо model_kwargs={"torch_dtype": "float16"}:
+# model.model.half()
 
 class RerankRequest(BaseModel):
     query: str
