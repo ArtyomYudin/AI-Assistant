@@ -1,4 +1,5 @@
 # core/collection_manager.py
+
 """
 CollectionManager — модуль, который:
 - загружает подпапки DATA_DIR
@@ -9,6 +10,7 @@ CollectionManager — модуль, который:
 
 Используется RAGCore, MilvusManager, твой embedder и сплиттеры.
 """
+import asyncio
 import base64
 import json
 import logging
@@ -88,6 +90,39 @@ class CollectionRouter:
         return max(sims, key=sims.get)
 
 
+    def pick_collections(
+            self,
+            query_vec: np.ndarray,
+            top_k: int = 2,
+            min_margin: float = 0.05,
+    ) -> List[str]:
+        """Возвращает top-K коллекций, если их скоры близки."""
+        sims = {
+            name: float(np.dot(query_vec, vec))
+            for name, vec in self.collections.items()
+        }
+        ranked = sorted(sims.items(), key=lambda x: x[1], reverse=True)
+        # Временно
+        logger.info(
+            "pick_collections: ranked=%s, margin=%.4f",
+            [(name, round(score, 4)) for name, score in ranked],
+            (ranked[0][1] - ranked[1][1]) if len(ranked) > 1 else 0.0,
+        )
+
+        if not ranked:
+            return []
+
+        best_name, best_score = ranked[0]
+        selected = [best_name]
+
+        for name, score in ranked[1:top_k]:
+            # Берём вторую коллекцию, только если она «догоняет» лидера
+            if best_score - score <= min_margin:
+                selected.append(name)
+
+        return selected
+
+
 class CollectionManager:
     """
     Управляет жизненным циклом всех коллекций:
@@ -120,14 +155,62 @@ class CollectionManager:
             socket_connect_timeout=5,
             socket_timeout=5,
         )
-    # ----------------------------------------------------------
-    # Загрузка коллекций с диска и индексирование
-    # ----------------------------------------------------------
+
+
+    async def _drop_all_collections(self) -> None:
+        """
+        Полностью удаляет все коллекции Milvus и очищает состояние роутера в Redis.
+        Вызывается из build_all_collections, если config.DROP_ALL_COLLECTIONS=True.
+        """
+        logger.warning("DROP_ALL_COLLECTIONS=True — удаляю ВСЕ коллекции Milvus")
+
+        try:
+            existing = await self.core.milvus.client.list_collections()
+        except Exception as e:
+            logger.exception("Не удалось получить список коллекций Milvus: %s", e)
+            existing = []
+
+        logger.info("Найдено коллекций для удаления: %d → %s", len(existing), existing)
+
+        for name in existing:
+            try:
+                await self.core.milvus.client.drop_collection(name)
+                logger.info("Коллекция '%s' удалена", name)
+            except Exception as e:
+                logger.exception("Ошибка при удалении коллекции '%s': %s", name, e)
+
+        # Очистка Redis: состояние роутера + векторы коллекций
+        try:
+            self.redis.delete(REDIS_ROUTER_KEY)
+            removed = 0
+            for key in self.redis.scan_iter(f"{REDIS_EMB_PREFIX}*"):
+                self.redis.delete(key)
+                removed += 1
+            logger.info(
+                "Redis очищен: удалён router_state и %d векторов коллекций", removed
+            )
+        except Exception as e:
+            logger.exception("Ошибка при очистке Redis: %s", e)
+
+        # Сбрасываем локальное состояние
+        self.collections = []
+        self.router = None
+
 
     async def build_all_collections(self):
         """
         Сканирует DATA_DIR, индексирует каждую подпапку как отдельную коллекцию Milvus.
+        Если config.DROP_ALL_COLLECTIONS=True — сначала удаляет все коллекции
+        и очищает состояние роутера в Redis.
         """
+
+        # 1. Опционально: полная очистка перед переиндексацией
+        if getattr(self.core.config, "DROP_ALL_COLLECTIONS", False):
+            await self._drop_all_collections()
+            logger.warning(
+                "DROP_ALL_COLLECTIONS=True сработал — коллекции удалены. "
+                "Не забудьте выставить флаг обратно в False."
+            )
 
         root = Path(self.core.config.DATA_DIR)
         if not root.exists():
@@ -147,7 +230,8 @@ class CollectionManager:
                 continue
 
             await self._index_collection(cname, docs)
-            self.collections.append(cname)
+            if cname not in self.collections:
+                self.collections.append(cname)
 
         # сохраняем имена коллекций
         self._save_router_state()
@@ -157,58 +241,143 @@ class CollectionManager:
     # ----------------------------------------------------------
 
     async def _index_collection(self, collection_name: str, docs: List[Document]):
+        """Индексирует документы в указанную коллекцию (делегирует в RAGCore)."""
+        total = await self.core._index_documents(collection_name, docs)
+        if total == 0:
+            logger.warning("_index_collection: %s — 0 фрагментов", collection_name)
+
+
+    async def _search_in_collections(
+            self,
+            query: str,
+            query_dense: List[float],
+            collections: List[str],
+            threshold_ratio: Optional[float] = None,
+            min_absolute: Optional[float] = None,
+            per_source_cap: Optional[int] = None,
+    ) -> List[Document]:
         """
-        Создаёт коллекцию Milvus и индексирует туда документы.
+        Параллельный hybrid_search во всех коллекциях с per-collection фильтрацией.
+
+        Для каждой коллекции:
+          - берём сырые результаты (apply_filter=False)
+          - считаем local_max = max(score) в этой коллекции
+          - threshold = max(local_max * threshold_ratio, min_absolute)
+          - оставляем только те, что >= threshold
+
+        Затем объединяем по всем коллекциям и дедуплицируем по hash.
+        Это защищает от ситуации, когда вторичная коллекция имеет низкие
+        реранкер-скоры из-за составного запроса, но её документы всё равно
+        нужны LLM для ответа на часть вопроса.
         """
 
-        # from core.milvus_manager import MilvusManager
+        if threshold_ratio is None:
+            threshold_ratio = self.core.config.COLLECTION_THRESHOLD_RATIO
+        if min_absolute is None:
+            min_absolute = self.core.config.COLLECTION_MIN_ABSOLUTE
+        if per_source_cap is None:
+            per_source_cap = self.core.config.PER_SOURCE_CAP
 
-        milvus = MilvusManager(
-            uri=self.core.config.MILVUS_URI,
-            collection_name=collection_name,
-            recreate=self.core.config.RECREATE_COLLECTION,
-        )
+        if not collections:
+            return []
 
-        # Чанкинг
-        chunks = self.core.splitters.split_by_headers(docs)
-        if not chunks:
-            return
+        # 1. Проверяем существование и загружаем коллекции
+        existing: List[str] = []
+        for cname in collections:
+            try:
+                if await self.core.milvus.client.has_collection(cname):
+                    await self.core.milvus.ensure_collection_loaded(cname)
+                    existing.append(cname)
+                else:
+                    logger.warning("Коллекция %s не найдена — пропускаю", cname)
+            except Exception as e:
+                logger.exception("Ошибка проверки коллекции %s: %s", cname, e)
 
-        texts = [d.page_content for d in chunks]
-        titles = [d.metadata.get("title") for d in chunks]
-        bm25_list = [d.metadata.get("bm25_text") for d in chunks]
-        sources = [d.metadata.get("source", "N/A") for d in chunks]
-        hashes = [d.metadata.get("hash") for d in chunks]
+        if not existing:
+            return []
 
-        dense = await self.core.embeddings.embed_documents(texts)
-        dim = len(dense[0])
-
-        await milvus.create_collection_if_needed(dense_dim=dim)
-
-        # сбор записей
-        rows = [
-            {
-                "text": t,
-                "title": tit,
-                "bm25_text": b25,
-                "source": src,
-                "hash": h,
-                "dense_vector": dv,
-            }
-            for t, tit, b25, src, h, dv in zip(
-                texts, titles, bm25_list, sources, hashes, dense
+        # 2. Параллельный поиск БЕЗ глобальной фильтрации
+        tasks = [
+            self.core.milvus.hybrid_search(
+                query_text=query,
+                query_dense=query_dense,
+                fetch_k=self.core.config.FETCH_K,
+                top_k=self.core.config.K,
+                collection_name=cname,
+                reranker_endpoint=self.core.config.RERANKER_BASE_URL,
+                apply_filter=False,  # ← ключевое: фильтр применяем сами
+                score_threshold=self.core.config.HYBRID_SEARCH_SCORE_THRESHOLD
             )
+            for cname in existing
         ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # удаление дублей
-        rows = await milvus.ensure_not_duplicate_rows(rows)
+        # 3. Per-collection relative threshold
+        merged: List[Document] = []
+        stats: List[str] = []
+        for cname, docs in zip(existing, results):
+            if isinstance(docs, Exception):
+                logger.exception("Ошибка поиска в %s: %s", cname, docs)
+                continue
+            if not docs:
+                stats.append(f"{cname}: 0/0")
+                continue
 
-        batch = self.core.config.INDEX_BATCH_SIZE
-        for i in range(0, len(rows), batch):
-            await milvus.insert_records(rows[i:i + batch])
+            local_max = max(d.metadata.get("score", 0.0) for d in docs)
+            local_threshold = max(local_max * threshold_ratio, min_absolute)
 
-        await milvus.client.load_collection(collection_name)
-        logger.info("Коллекция %s загружена в память.", collection_name)
+            kept = []
+            for doc in docs:
+                score = doc.metadata.get("score", 0.0)
+                if score >= local_threshold:
+                    doc.metadata["collection"] = cname
+                    kept.append(doc)
+
+            stats.append(
+                f"{cname}: {len(kept)}/{len(docs)} "
+                f"(max={local_max:.3f}, thr={local_threshold:.3f})"
+            )
+            merged.extend(kept)
+
+        logger.info("_search_in_collections per-collection: %s", " | ".join(stats))
+
+        if not merged:
+            return []
+
+        # 4. Сортировка по score (важно: cap должен применяться к отсортированному)
+        merged.sort(key=lambda d: d.metadata.get("score", 0.0), reverse=True)
+
+        # 5. Per-source cap: не более N чанков с одного файла
+        source_counts: dict = {}
+        capped: List[Document] = []
+        dropped_by_source: dict = {}
+        for d in merged:
+            src = d.metadata.get("source", "N/A")
+            if source_counts.get(src, 0) >= per_source_cap:
+                dropped_by_source[src] = dropped_by_source.get(src, 0) + 1
+                continue
+            source_counts[src] = source_counts.get(src, 0) + 1
+            capped.append(d)
+
+        if dropped_by_source:
+            logger.info(
+                "_search_in_collections per-source cap=%d dropped: %s",
+                per_source_cap,
+                ", ".join(f"{src}: -{n}" for src, n in dropped_by_source.items()),
+            )
+
+        # 6. Дедуп по hash
+        seen: set = set()
+        deduped: List[Document] = []
+        for d in capped:
+            h = d.metadata.get("hash")
+            if h and h in seen:
+                continue
+            if h:
+                seen.add(h)
+            deduped.append(d)
+
+        return deduped
 
 
     def is_followup_query(self, query: str) -> bool:
@@ -303,49 +472,110 @@ class CollectionManager:
     # Выполнить поиск с роутингом
     # ----------------------------------------------------------
 
-    async def routed_search(self, query: str, conversation_id: Optional[str] = None):
-        """
-                Автоматически выбирает коллекцию и выполняет поиск в ней.
-                conversation_id: опциональная id диалога/сессии; если None — используется "global".
-                """
-
+    async def routed_search(
+            self,
+            query: str,
+            conversation_id: Optional[str] = None,
+    ) -> List[Document]:
+        """Top-K routing + параллельный поиск + слияние."""
         if conversation_id is None:
             conversation_id = "global"
 
-        # если роутер ещё не создан — попробуем восстановить/построить
         if not self.router:
-            try:
-                # попытка восстановить (если в Redis лежит), иначе пересоздать
-                await self.build_router()
-            except Exception as e:
-                logger.exception("Ошибка при создании роутера: %s", e)
-                raise
+            await self.build_router()
 
-        # Загружаем последнюю коллекцию из Redis (по conversation_id)
+        # Эмбеддинг запроса — один раз для routing и для поиска
+        query_dense = await self.core._get_embedding_cached(query)
+        if not query_dense:
+            logger.warning("Не удалось получить эмбеддинг для запроса: %r", query)
+            return []
+
         last = self.load_last_used_collection(conversation_id)
 
-        # Если follow-up и есть последняя коллекция — используем её
         if last and self.is_followup_query(query):
-            cname = last
-            logger.info("Follow-up запрос (conv=%s) — использую прошлую коллекцию: %s", conversation_id, cname)
+            collections = [last]
+            logger.info("Follow-up (conv=%s) — коллекция %s", conversation_id, last)
         else:
-            # Иначе обычный routing
-            cname = await self.route_query(query)
-            logger.info("RAW QUERY: %s", query)
-            logger.info("Роутер выбрал коллекцию: %s", cname)
-            # Сохраняем выбор коллекции в Redis (по conversation_id)
-            self._save_last_used_collection(cname, conversation_id)
+            collections = self.router.pick_collections(query_dense, top_k=2,  min_margin=0.1)
+            logger.info("Роутер выбрал коллекции: %s", collections)
+            if collections:
+                self.save_last_used_collection(collections[0], session_id=conversation_id)
 
-        qvec = await self.core._get_embedding_cached(query)
-
-        return await self.core.milvus.hybrid_search(
-            query_text=query,
-            query_dense=qvec,
-            fetch_k=self.core.config.FETCH_K,
-            top_k=self.core.config.K,
-            collection_name=cname,
-            reranker_endpoint=self.core.config.RERANKER_BASE_URL,
+        merged = await self._search_in_collections(query, query_dense, collections)
+        logger.info(
+            "routed_search: collections=%s, merged=%d", collections, len(merged)
         )
+        return merged[: self.core.config.K]
+
+
+    async def routed_search_with_fallback(
+            self,
+            query: str,
+            conversation_id: Optional[str] = None,
+            min_relevant: Optional[int] = None,
+    ) -> List[Document]:
+        """
+        Как routed_search, но если после первичного поиска осталось меньше
+        min_relevant документов — доискивает в остальных коллекциях.
+        """
+        if conversation_id is None:
+            conversation_id = "global"
+        # if min_relevant is None:
+        #     min_relevant = max(1, self.core.config.K // 2)
+
+
+        if not self.router:
+            await self.build_router()
+
+        query_dense = await self.core._get_embedding_cached(query)
+        if not query_dense:
+            return []
+
+        last = self.load_last_used_collection(conversation_id)
+
+        if last and self.is_followup_query(query):
+            collections = [last]
+            logger.info("Follow-up (conv=%s) — коллекция %s", conversation_id, last)
+        else:
+            collections = self.router.pick_collections(query_dense, top_k=2,  min_margin=0.1)
+            logger.info("Роутер выбрал коллекции: %s", collections)
+            if collections:
+                self.save_last_used_collection(collections[0], session_id=conversation_id)
+
+        merged = await self._search_in_collections(query, query_dense, collections)
+        logger.info("Первичный поиск: collections=%s, docs=%d", collections, len(merged))
+
+        if min_relevant is None:
+            # Для N коллекций нужно хотя бы N документов (по одному от каждой),
+            # но не меньше 2, если коллекций 1 (тогда нужен запас).
+            n_collections = len(collections) if 'collections' in locals() else 1
+            min_relevant = max(2, n_collections)
+
+        if len(merged) < min_relevant:
+            all_collections = list(self.router.collections.keys())
+            remaining = [c for c in all_collections if c not in collections]
+            if remaining:
+                logger.info(
+                    "Fallback: docs=%d < %d → доискиваю в %s",
+                    len(merged), min_relevant, remaining,
+                )
+                extra = await self._search_in_collections(query, query_dense, remaining)
+
+                # Мержим и дедуплицируем по hash
+                seen = {d.metadata.get("hash") for d in merged if d.metadata.get("hash")}
+                for d in extra:
+                    h = d.metadata.get("hash")
+                    if h and h in seen:
+                        continue
+                    if h:
+                        seen.add(h)
+                    merged.append(d)
+
+                merged.sort(key=lambda d: d.metadata.get("score", 0.0), reverse=True)
+                logger.info("Fallback завершён: docs=%d", len(merged))
+
+        return merged[: self.core.config.K]
+
 
     # ---------------------------------------------------------
     # Redis: сохранение состояния

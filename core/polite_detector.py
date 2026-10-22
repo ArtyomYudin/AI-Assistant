@@ -1,3 +1,5 @@
+# core/polite_detector.py
+
 import re
 
 class PoliteDetector:

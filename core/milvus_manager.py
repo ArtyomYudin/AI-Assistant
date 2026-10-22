@@ -1,3 +1,5 @@
+# core/milvus_manager.ry
+
 import logging
 from typing import Any, Dict, Iterable, List
 
@@ -5,9 +7,14 @@ from langchain_core.documents import Document
 from pymilvus import AnnSearchRequest, DataType, Function, FunctionType, MilvusException
 from pymilvus.client.types import LoadState
 
+from config.rag_config import RAGConfig
 from core.utils import hash_text, remove_stopwords_russian
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s: %(message)s")
+# Приглушаем шумные библиотеки
+for noisy in ("httpx", "httpcore", "urllib3", "asyncio"):
+    logging.getLogger(noisy).setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 class MilvusManager:
@@ -41,6 +48,29 @@ class MilvusManager:
             except Exception as e:
                 logger.error("Неожиданная ошибка при закрытии Milvus: %s", e)
                 raise
+
+
+    def _extract_score(self, hit: Any) -> float:
+        """
+        Извлекает score из Hit-объекта pymilvus.
+        Для hybrid_search с reranker score лежит в .distance (pymilvus 2.4+)
+        или в .score (некоторые версии). Для dict-представления — по ключам.
+        """
+        # Сначала пробуем .score (может быть в новых версиях)
+        v = getattr(hit, "score", None)
+        if v is not None:
+            return float(v)
+        # Потом .distance (основное поле для hybrid_search)
+        v = getattr(hit, "distance", None)
+        if v is not None:
+            return float(v)
+        # Fallback для dict
+        if isinstance(hit, dict):
+            for key in ("score", "distance"):
+                if key in hit and hit[key] is not None:
+                    return float(hit[key])
+        return 0.0
+
 
     async def create_collection_if_needed(self, dense_dim: int) -> None:
         """
@@ -150,19 +180,51 @@ class MilvusManager:
                 unique.append(row)
         return unique
 
-    def filter_documents(self, docs: List[Document], query: str, score_threshold: float = 0.01) -> List[Document]:
+    def filter_documents(
+            self,
+            docs: List[Document],
+            query: str,
+            score_threshold: float = 0.3,
+    ) -> List[Document]:
         """
-        Фильтрация документов после поиска.
-        - Оставляем только те, что прошли порог score
-        - Дополнительно можно добавить проверку на наличие ключевых слов из запроса
+        Оставляет документы с score >= score_threshold.
+        Для bge-reranker-v2-m3: чем выше score, тем релевантнее.
+        Пустой результат — валидный результат (значит, нет релевантных документов).
         """
-        filtered = [d for d in docs if d.metadata.get("score", 1) <= score_threshold]
+        if not docs:
+            return []
 
-        # Если после фильтрации ничего не осталось — возвращаем топ-1 как fallback
-        if not filtered and docs:
-            filtered = [docs[0]]
+        # Безопасное логирование запроса (даже если query окажется None или короче 80 символов)
+        query_preview = (query[:80] + '...') if query and len(query) > 80 else (query or '')
 
-        return filtered
+        # Формируем детальную информацию по каждому документу для логирования
+        doc_details = []
+        for d in docs:
+            score = round(d.metadata.get('score', 0.0), 4)
+
+            # Берем ID документа, если его нет — обрезаем начало текста для идентификации
+            doc_id = d.id if hasattr(d, 'id') and d.id else d.metadata.get('id')
+            if not doc_id:
+                content = getattr(d, 'page_content', '') or getattr(d, 'text', '')
+                doc_id = f"Text({content[:40]}...)" if content else "UnknownDoc"
+
+            doc_details.append(f"[{doc_id}]: {score}")
+
+        # Логируем общую информацию и детали по каждому документу
+        logger.info(
+            "filter_documents: query=%r, threshold=%.2f, doc_scores=[%s]",
+            query_preview, score_threshold, ", ".join(doc_details)
+        )
+
+        # Фильтрация
+        filtered = [d for d in docs if d.metadata.get('score', 0.0) >= score_threshold]
+
+        logger.info(
+            "filter_documents: docs_before=%d, docs_after=%d",
+            len(docs), len(filtered)
+        )
+
+        return filtered  # ← без fallback
 
     async def insert_records(self, rows: List[Dict[str, Any]]) -> int:
         """
@@ -174,10 +236,13 @@ class MilvusManager:
             return 0
         try:
             for row in rows:
-                title = row.get("title", "")
-                body = row.get("text", "")
-                row["text_full"] = f"{title}. {body}" if title else body
-                # row["bm25_text"] = row.get("bm25_text")
+                # text_full = title + body, БЕЗ дубля
+                title = row.get("title", "") or ""
+                body = row.get("text", "") or ""
+                if title and not body.startswith(title):
+                    row["text_full"] = f"{title}. {body}".strip(". ")
+                else:
+                    row["text_full"] = body
             await self.client.insert(self.collection_name, rows)
             await self.client.flush(collection_name=self.collection_name)
             return len(rows)
@@ -191,7 +256,9 @@ class MilvusManager:
                             fetch_k: int,
                             top_k: int,
                             collection_name: str = "",
-                            reranker_endpoint: str = ""
+                            reranker_endpoint: str = "",
+                            apply_filter: bool = True,
+                            score_threshold: float = 0.3,        # ← НОВОЕ (вынести из хардкода)
                             ) -> List[Document]:
         """
         Гибридный поиск: dense + sparse + (опционально) reranker.
@@ -213,9 +280,9 @@ class MilvusManager:
             )
 
             # Поиск по sparse-вектору (BM25)
-            query_for_sparse = remove_stopwords_russian(query_text) # удаление стоп-слов
+            # query_for_sparse = remove_stopwords_russian(query_text) # удаление стоп-слов
             req_sparse = AnnSearchRequest(
-                data = [query_for_sparse],
+                data=[query_text],
                 anns_field = "sparse_vector",
                 limit = fetch_k,
                 param = {"drop_ratio_search": 0.2}
@@ -226,7 +293,7 @@ class MilvusManager:
             if reranker_endpoint:
                 ranker = Function(
                     name = "vllm_semantic_ranker",
-                    input_field_names = ["text"],
+                    input_field_names = ["text_full"],
                     function_type = FunctionType.RERANK,
                     params = {
                         "reranker": "model",
@@ -234,7 +301,7 @@ class MilvusManager:
                         "queries": [query_text],
                         "endpoint": reranker_endpoint,
                         "maxBatch": 64,
-                        "truncate_prompt_tokens": 256
+                        "truncate_prompt_tokens": 2048
                     }
                 )
 
@@ -245,6 +312,14 @@ class MilvusManager:
                 ranker = ranker,
                 output_fields = ["text","title", "bm25_text", "source","hash"],
                 limit = top_k
+            )
+            # ДИАГНОСТИКА — временно
+            _hits_count = sum(len(hits) for hits in results)
+            logger.info(
+                "hybrid_search: collection=%s fetch_k=%d top_k=%d reranker=%s → hits=%d",
+                collection_name, fetch_k, top_k,
+                "on" if reranker_endpoint else "off",
+                _hits_count,
             )
 
             # Преобразуем результаты в LangChain Document
@@ -261,12 +336,15 @@ class MilvusManager:
                                     "bm25_text": ent.get("bm25_text"),
                                     "source": ent.get("source","N/A"),
                                     "hash": ent.get("hash",""),
-                                    "score": getattr(res,"score",0)
+                                    "score": self._extract_score(res)
                                 }
                             )
                         )
 
-            docs = self.filter_documents(docs, query_text, score_threshold=0.01)
+            # Применяем порог релевантности (только если попросили)
+            if apply_filter:
+                docs = self.filter_documents(docs, query_text, score_threshold=score_threshold)
+
             return docs
         except Exception as e:
             logger.exception("Ошибка при гибридном поиске: %s", e)

@@ -1,3 +1,5 @@
+# core/document_loader.py
+
 import logging, os, pathlib
 from typing import List, Optional
 import PyPDF2
@@ -21,12 +23,12 @@ def load_documents_from_directory(directory_path: str, file_extensions: Optional
                         reader = PyPDF2.PdfReader(f)
                         text = "\n".join((p.extract_text() or "") for p in reader.pages).strip()
                     if text:
-                        docs.append(Document(page_content=text, metadata={"source": str(path)}))
+                        docs.append(Document(page_content=text, metadata={"source": str(path.relative_to(directory))}))
                 else:
                     with open(path, "r", encoding="utf-8") as f:
                         content = f.read().strip()
                     if content:
-                        docs.append(Document(page_content=content, metadata={"source": str(path)}))
+                        docs.append(Document(page_content=content, metadata={"source": str(path.relative_to(directory))}))
             except Exception as e:
                 logger.exception("Ошибка при загрузке %s: %s", path, e)
     logger.info("Загружено документов: %d", len(docs))

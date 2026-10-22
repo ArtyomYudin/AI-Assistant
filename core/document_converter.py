@@ -1,3 +1,5 @@
+# core/document_converter.py
+
 import time
 from pathlib import Path
 from docling.datamodel.base_models import InputFormat

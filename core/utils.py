@@ -1,4 +1,8 @@
+# core/utils.py
+
 import hashlib
+import logging
+import os
 import re
 from typing import Optional
 import tiktoken
@@ -7,24 +11,147 @@ from jose import jwt, JWTError
 
 import config.rag_config
 
-_tokenizer = None
+logger = logging.getLogger(__name__)
+
+# Кэш токенизаторов: родной (HF) и fallback (tiktoken)
+_native_tokenizer = None
+_native_tokenizer_failed = False
+_fallback_tokenizer = None
+
+_last_attempt = 0.0
+RETRY_INTERVAL = 60.0
+
+def _resolve_model_path() -> Optional[str]:
+    """
+    Определяет путь к папке модели по приоритету:
+    1. env LLM_MODEL_PATH (проброшено из docker-compose)
+    2. config.RAGConfig.LLM_MODEL_PATH (если поле добавлено)
+    3. None — тогда используется fallback
+    """
+    path = os.getenv("LLM_MODEL_PATH")
+    if path:
+        return path
+
+    try:
+        path = getattr(config.rag_config.RAGConfig, "LLM_MODEL_PATH", None)
+    except Exception:
+        path = None
+
+    if not path:
+        try:
+            path = config.rag_config.RAGConfig().LLM_MODEL_PATH
+        except Exception:
+            path = None
+
+    return path
+
+
+def _load_native_tokenizer():
+    """
+    Ленивая загрузка родного токенизатора модели из LLM_MODEL_PATH.
+    При первой ошибке выставляет флаг _native_tokenizer_failed,
+    чтобы не пытаться снова на каждый вызов.
+    """
+    global _native_tokenizer, _native_tokenizer_failed
+
+    if _native_tokenizer is not None:
+        return _native_tokenizer
+    if _native_tokenizer_failed:
+        return None
+
+    path = _resolve_model_path()
+    if not path:
+        logger.warning(
+            "LLM_MODEL_PATH не задан — используется tiktoken fallback. "
+            "Задайте LLM_MODEL_PATH в docker-compose для точного подсчёта токенов."
+        )
+        _native_tokenizer_failed = True
+        return None
+
+    try:
+        from transformers import AutoTokenizer
+        _native_tokenizer = AutoTokenizer.from_pretrained(
+            path,
+            trust_remote_code=True,
+            local_files_only=True,   # запрещаем ходить в HF Hub
+        )
+        logger.info("Родной токенизатор загружен: %s", path)
+        return _native_tokenizer
+    except Exception as e:
+        logger.warning(
+            "Не удалось загрузить родной токенизатор из %s (%s). "
+            "Использую tiktoken с калибровкой под русский.",
+            path, e,
+        )
+        _native_tokenizer_failed = True
+        return None
+
+
+def _get_fallback_tokenizer():
+    global _fallback_tokenizer
+    if _fallback_tokenizer is None:
+        _fallback_tokenizer = tiktoken.get_encoding("cl100k_base")
+    return _fallback_tokenizer
+
 
 def get_tokenizer():
-    global _tokenizer
-    if _tokenizer is None:
-        _tokenizer = tiktoken.get_encoding("cl100k_base")
-    return _tokenizer
+    """
+    Возвращает родной токенизатор модели, если он доступен,
+    иначе — tiktoken cl100k_base.
+    """
+    native = _load_native_tokenizer()
+    return native if native is not None else _get_fallback_tokenizer()
+
+
+def _encode(tokenizer, text: str):
+    """Универсальная обёртка encode: HF и tiktoken принимают разные kwargs."""
+    try:
+        return tokenizer.encode(text, add_special_tokens=False)
+    except TypeError:
+        return tokenizer.encode(text)
+
+
+def _decode(tokenizer, ids):
+    """Универсальная обёртка decode."""
+    try:
+        return tokenizer.decode(ids, skip_special_tokens=True)
+    except TypeError:
+        return tokenizer.decode(ids)
+
 
 def count_tokens(text: Optional[str], tokenizer=None) -> int:
-    tokenizer = tokenizer or get_tokenizer()
-    return len(tokenizer.encode(text or ""))
+    """
+    Считает токены через родной токенизатор модели.
+    Если он недоступен — fallback на tiktoken с калибровкой:
+    cl100k завышает русский ~1.33x (2.71 токена/слово у Qwen
+    против 1.74 у T-lite), поэтому умножаем на 0.75.
+    """
+    if tokenizer is None:
+        tokenizer = get_tokenizer()
+
+    if not text:
+        return 0
+
+    if tokenizer is _native_tokenizer and _native_tokenizer is not None:
+        return len(_encode(tokenizer, text))
+
+    # Fallback-ветка (tiktoken или явно переданный чужой токенизатор)
+    return int(len(_encode(tokenizer, text)) * 0.75)
+
 
 def truncate_text_by_tokens(text: str, max_tokens: int, tokenizer=None) -> str:
-    tokenizer = tokenizer or get_tokenizer()
-    tokens = tokenizer.encode(text or "")
+    if tokenizer is None:
+        tokenizer = get_tokenizer()
+
+    if not text:
+        return ""
+
+    tokens = _encode(tokenizer, text)
     if len(tokens) <= max_tokens:
         return text
-    return tokenizer.decode(tokens[:max_tokens])
+
+    return _decode(tokenizer, tokens[:max_tokens])
+
 
 def hash_text(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()

@@ -1,3 +1,5 @@
+# core/local_embeddings.py
+
 import httpx
 from langchain_core.embeddings import Embeddings
 
@@ -10,6 +12,9 @@ class LocalEmbeddings(Embeddings):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.client = httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
+
+    async def aclose(self):
+        await self.client.aclose()
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
         if not texts:

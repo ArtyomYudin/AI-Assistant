@@ -1,3 +1,5 @@
+# core/rag_core.py
+
 import asyncio
 import logging
 import time
@@ -5,7 +7,6 @@ from typing import List, Optional
 
 from langchain_core.documents import Document
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
-# from transformers import TFOpenAIGPTDoubleHeadsModel
 
 from config.rag_config import RAGConfig
 from core.chat_history import RedisChatHistory
@@ -16,65 +17,71 @@ from core.splitters import SplitterManager
 from core.utils import count_tokens, truncate_text_by_tokens
 from core.embedding_cache import RedisEmbeddingCache
 from core.collection_manager import CollectionManager
+from core.rate_limiter import LLMRateLimiter, RateLimitExceeded
 
 logger = logging.getLogger(__name__)
 
+
 class RAGCore:
     """
-      Основной класс, объединяющий все компоненты RAG-пайплайна:
+    Основной класс RAG-пайплайна:
       - загрузка и индексация документов
-      - поиск по Milvus (векторное хранилище)
-      - генерация эмбеддингов
-      - кэширование эмбеддингов в Redis
-      - управление историей диалога
-      - генерация ответов с использованием LLM
+      - поиск по Milvus (гибридный dense + BM25 + reranker)
+      - маршрутизация по коллекциям (multi-collection)
+      - генерация ответов с LLM (стриминг + история)
     """
+
     def __init__(self, config: Optional[RAGConfig] = None):
-        # Загружаем конфиг или используем значения по умолчанию
-        # self.config = config or RAGConfig()
         self.config = config or RAGConfig()
 
-        # Менеджер истории диалога (хранит переписку)
+        # История диалога
         self.history = RedisChatHistory(
-            session_id = "default",  # потом можно передавать разный session_id от клиента
-            host = self.config.REDIS_HOST,
-            port = self.config.REDIS_PORT,
-            ttl_days = self.config.HISTORY_TTL_DAYS,
-            max_messages = self.config.MAX_HISTORY_MESSAGES
+            session_id="default",
+            host=self.config.REDIS_HOST,
+            port=self.config.REDIS_PORT,
+            ttl_days=self.config.HISTORY_TTL_DAYS,
+            max_messages=self.config.MAX_HISTORY_MESSAGES,
         )
 
-        # Подключение к Milvus (векторное хранилище)
+        # Milvus
         self.milvus = MilvusManager(
-            uri = self.config.MILVUS_URI,
-            collection_name = self.config.COLLECTION_NAME,
-            recreate = self.config.RECREATE_COLLECTION
+            uri=self.config.MILVUS_URI,
+            collection_name=self.config.COLLECTION_NAME,
+            recreate=self.config.RECREATE_COLLECTION,
         )
 
-        # Управление сплиттингом текста (по заголовкам, чанкам)
+        # Сплиттер
         self.splitters = SplitterManager(
             self.config.CHUNK_SIZE,
-            self.config.CHUNK_OVERLAP
+            self.config.CHUNK_OVERLAP,
         )
 
-        # Лениво инициализируемые объекты (создаются при первом вызове)
+        # Лениво инициализируемые объекты
         self._embeddings = None
         self._llm = None
 
-        # Ретривер (поиск документов по запросу)
+        # Ретривер
         self.retriever = None
 
-        # Цепочка вопрос-ответ с историей и стримингом
+        # QA-генератор
         self.qa_chain_with_history = None
 
-        # Кэш эмбеддингов запросов в Redis
+        # Кэш эмбеддингов
         self.embedding_cache = RedisEmbeddingCache(
-            host = self.config.REDIS_HOST,
-            port = self.config.REDIS_PORT,
-            ttl = self.config.REDIS_TTL
+            host=self.config.REDIS_HOST,
+            port=self.config.REDIS_PORT,
+            ttl=self.config.REDIS_TTL,
         )
 
-        # менеджер коллекций
+        # Менеджер коллекций (роутер)
         self.collection_manager = CollectionManager(core=self)
+
+        # Rate-limit на LLM: защита vLLM от перегрузки + per-session лимит
+        self.llm_limiter = LLMRateLimiter(
+            max_concurrent=self.config.LLM_MAX_CONCURRENT,
+            max_queue_wait=self.config.LLM_MAX_QUEUE_WAIT,
+            max_per_session_per_min=self.config.LLM_MAX_PER_SESSION_PER_MIN,
+        )
 
     async def __aenter__(self):
         return self
@@ -83,107 +90,208 @@ class RAGCore:
         await self.close()
 
     def __repr__(self):
-        return f"<RAGConfig mode={self.config.MODE}, collection={self.config.COLLECTION_NAME}>"
+        return (
+            f"<RAGCore mode={self.config.MODE}, "
+            f"collection={self.config.COLLECTION_NAME}, "
+            f"llm_slots={self.llm_limiter._sem._value}/{self.llm_limiter._max_concurrent}>"
+        )
 
     def __str__(self):
         return self.__repr__()
 
+    # ─────────────────────────────────────────────────────────────
+    # Ленивая инициализация моделей
+    # ─────────────────────────────────────────────────────────────
+
     @property
-    # def embeddings(self):
-    #     if self._embeddings is None:
-    #         from langchain_openai import OpenAIEmbeddings
-    #         self._embeddings = OpenAIEmbeddings(
-    #             model=self.config.EMBEDDING_NAME,
-    #             api_key="EMPTY",
-    #             base_url=self.config.EMBEDDING_BASE_URL,
-    #             embedding_ctx_length=512,
-    #             timeout=60,
-    #         )
-    #     return self._embeddings
     def embeddings(self):
-        """
-        Локальная или внешняя модель эмбеддингов.
-        При первом вызове создаётся объект.
-        """
         if self._embeddings is None:
             from core.local_embeddings import LocalEmbeddings
             self._embeddings = LocalEmbeddings(
-                model = self.config.EMBEDDING_NAME,
-                base_url = self.config.EMBEDDING_BASE_URL,
-                timeout = 60,
+                model=self.config.EMBEDDING_NAME,
+                base_url=self.config.EMBEDDING_BASE_URL,
+                timeout=60,
             )
         return self._embeddings
 
     @property
     def llm(self):
-        """
-        LLM-клиент (ChatOpenAI API-совместимый).
-        Используется для генерации ответов.
-        """
         if self._llm is None:
             from langchain_openai import ChatOpenAI
             self._llm = ChatOpenAI(
-                model = self.config.LLM_NAME,
-                api_key = "EMPTY",
-                base_url =self.config.LLM_BASE_URL,
-                max_tokens = self.config.LLM_MAX_TOKEN,
-                temperature = self.config.LLM_TEMPERATURE,
-                streaming = True,
-                extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
+                model=self.config.LLM_NAME,
+                api_key="EMPTY",
+                base_url=self.config.LLM_BASE_URL,
+                max_tokens=self.config.LLM_MAX_TOKEN,
+                temperature=self.config.LLM_TEMPERATURE,
+                top_p=self.config.LLM_TOP_P,
+                presence_penalty=self.config.LLM_PRESENCE_PENALTY,
+                streaming=True,
+                extra_body={
+                    "chat_template_kwargs": {"enable_thinking": False},
+                    "top_k": self.config.LLM_TOP_K,
+                    "bad_words": [
+                        "Если нужно — могу",
+                        "Если нужно, могу",
+                        "Если нужно – могу",
+                        "Если нужно, я могу",
+                        "Если нужно — я могу",
+                        "Если потребуется — могу",
+                        "Если потребуется, могу",
+                        "Если необходимо — могу",
+                        "Если необходимо, могу",
+                        "Если понадобится — могу",
+                        "Если понадобится, могу",
+                        "Дайте знать, если",
+                        "Дайте знать если",
+                        "Обращайтесь, если",
+                        "Обращайтесь если",
+                        "Готов помочь",
+                        "Готова помочь",
+                        "Рад помочь",
+                        "Рада помочь",
+                        "могу экспортировать",
+                        "могу прислать",
+                        "могу отфильтровать",
+                        "могу создать",
+                        "могу сделать",
+                        "могу предоставить",
+                        "могу уточнить",
+                        "могу показать",
+                        "могу предложить",
+                    ],
+                },
             )
         return self._llm
 
+
+    async def _index_documents(
+            self,
+            collection_name: str,
+            documents: List[Document],
+    ) -> int:
+        """
+        Каноничный путь индексации в коллекцию.
+        Возвращает число вставленных фрагментов.
+
+        Правила:
+          - text       = тело чанка БЕЗ title (для LLM-контекста и reranker'а)
+          - text_full  = title + body (формируется в MilvusManager.insert_records)
+          - dense      = эмбеддинг ТОЛЬКО от body
+          - bm25_text  = title + global_bm25 + body[:2500] (из SplitterManager)
+        """
+        if not documents:
+            return 0
+
+        processed = self.splitters.split_by_headers(documents)
+        if not processed:
+            logger.warning("Нет чанков после сплиттинга для %s", collection_name)
+            return 0
+
+        # ★ Ключевое: text = body без title, эмбеддинг от body
+        texts = [d.page_content for d in processed]
+        titles = [d.metadata.get("title", "") for d in processed]
+        bm25_texts = [d.metadata.get("bm25_text", "") for d in processed]
+        sources = [d.metadata.get("source", "N/A") for d in processed]
+        hashes = [d.metadata.get("hash", "") for d in processed]
+
+        # Эмбеддинги — от тела чанка
+        try:
+            dense_vectors = await self.embeddings.embed_documents(texts)
+        except Exception as e:
+            logger.exception("Ошибка эмбеддинга для %s: %s", collection_name, e)
+            raise
+
+        if not dense_vectors:
+            logger.error("Пустой список эмбеддингов для %s", collection_name)
+            return 0
+        dense_dim = len(dense_vectors[0])
+
+        # Milvus-менеджер на эту коллекцию
+        milvus = MilvusManager(
+            uri=self.config.MILVUS_URI,
+            collection_name=collection_name,
+            recreate=self.config.RECREATE_COLLECTION,
+        )
+        await milvus.create_collection_if_needed(dense_dim=dense_dim)
+
+        rows = [
+            {
+                "text": t,
+                "title": tit,
+                "bm25_text": bm25,
+                "source": s,
+                "hash": h,
+                "dense_vector": dv,
+            }
+            for t, tit, bm25, s, h, dv in zip(
+                texts, titles, bm25_texts, sources, hashes, dense_vectors
+            )
+        ]
+
+        unique = await milvus.ensure_not_duplicate_rows(rows)
+        if not unique:
+            logger.info("Все фрагменты уже в %s", collection_name)
+            return 0
+
+        bs = self.config.INDEX_BATCH_SIZE
+        total = 0
+        for i in range(0, len(unique), bs):
+            total += await milvus.insert_records(unique[i:i + bs])
+
+        await milvus.client.load_collection(collection_name)
+        logger.info(
+            "Коллекция %s проиндексирована: %d фрагментов (dim=%d)",
+            collection_name, total, dense_dim,
+        )
+        return total
+
+    # ─────────────────────────────────────────────────────────────
+    # Работа с историей
+    # ─────────────────────────────────────────────────────────────
+
     def get_history(self, session_id: str) -> RedisChatHistory:
-        """
-        Выдаем новый объект под конкретный session_id.
-        """
         return RedisChatHistory(
-            session_id = session_id,
-            host = self.config.REDIS_HOST,
-            port = self.config.REDIS_PORT,
-            ttl_days = self.config.HISTORY_TTL_DAYS,
-            max_messages=self.config.MAX_HISTORY_MESSAGES
+            session_id=session_id,
+            host=self.config.REDIS_HOST,
+            port=self.config.REDIS_PORT,
+            ttl_days=self.config.HISTORY_TTL_DAYS,
+            max_messages=self.config.MAX_HISTORY_MESSAGES,
         )
 
+    # ─────────────────────────────────────────────────────────────
+    # Загрузка и индексация
+    # ─────────────────────────────────────────────────────────────
+
     def load_documents(self, directory: Optional[str] = None) -> List[Document]:
-        """
-        Загружает документы из указанной директории.
-        По умолчанию — директория config.DATA_DIR.
-        """
         directory = directory or self.config.DATA_DIR
         return load_documents_from_directory(directory)
 
     async def setup_collection(self, collection_name: str, documents: List[Document]):
-        """
-        Создаёт коллекцию Milvus с именем collection_name
-        и индексирует туда документы.
-        """
-
-        # Создаём отдельный экземпляр менеджера Milvus под коллекцию
         milvus = MilvusManager(
             uri=self.config.MILVUS_URI,
             collection_name=collection_name,
-            recreate=self.config.RECREATE_COLLECTION
+            recreate=self.config.RECREATE_COLLECTION,
         )
 
-        # Сплитинг по чанкам
         processed = self.splitters.split_by_headers(documents)
         if not processed:
             return
 
-        texts = [d.page_content for d in processed]
+        texts = [
+            f"{d.metadata.get('title', '')}. {d.page_content}".strip(". ")
+            for d in processed
+        ]
         titles = [d.metadata.get("title") for d in processed]
         bm25_t = [d.metadata.get("bm25_text") for d in processed]
         sources = [d.metadata.get("source", "N/A") for d in processed]
         hashes = [d.metadata.get("hash") for d in processed]
 
-        # Эмбеддинги
         dense_vectors = await self.embeddings.embed_documents(texts)
         dim = len(dense_vectors[0])
 
         await milvus.create_collection_if_needed(dense_dim=dim)
 
-        # Формируем записи
         rows = [
             {
                 "text": t,
@@ -193,7 +301,9 @@ class RAGCore:
                 "hash": h,
                 "dense_vector": dv,
             }
-            for t, tit, b25, s, dv, h in zip(texts, titles, bm25_t, sources, dense_vectors, hashes)
+            for t, tit, b25, s, dv, h in zip(
+                texts, titles, bm25_t, sources, dense_vectors, hashes
+            )
         ]
 
         unique = await milvus.ensure_not_duplicate_rows(rows)
@@ -204,74 +314,20 @@ class RAGCore:
         logger.info("Коллекция %s загружена в память", collection_name)
 
     async def setup_vectorstore(self, documents: List[Document]) -> None:
-        """
-        Индексация документов в Milvus:
-        - нарезка на чанки
-        - генерация эмбеддингов
-        - вставка в Milvus
-        """
-        if not documents:
-            logger.warning("Нет документов для индексации")
-            return
+        """Индексирует документы в основную коллекцию (config.COLLECTION_NAME)."""
+        total = await self._index_documents(self.config.COLLECTION_NAME, documents)
+        if total == 0:
+            logger.warning("setup_vectorstore: вставлено 0 фрагментов")
 
-        # Сплитим документы по заголовкам / чанкам
-        processed = self.splitters.split_by_headers(documents)
-        if not processed:
-            logger.warning("Нет документов после обработки")
-            return
-        texts = [d.page_content for d in processed]
-        title = [d.metadata.get("title") for d in processed]
-        bm25_text = [d.metadata.get("bm25_text") for d in processed]
-        sources = [d.metadata.get("source","N/A") for d in processed]
-        hashes = [d.metadata.get("hash") for d in processed]
-
-        # Генерация эмбеддингов для каждого чанка
-        try:
-            dense_vectors = await self.embeddings.embed_documents(texts)
-        except Exception as e:
-            logger.exception("Ошибка при эмбеддингах: %s", e)
-            raise
-        dense_dim = len(dense_vectors[0]) if dense_vectors else 0
-        if dense_dim <= 0:
-            logger.error("Не удалось определить размерность эмбеддинга")
-            return
-
-        # Создаём коллекцию в Milvus (если нет)
-        await self.milvus.create_collection_if_needed(dense_dim=dense_dim)
-
-        # Подготавливаем данные для вставки
-        rows = [
-            {"text": t,
-             "title": tit,
-             "bm25_text": bm25,
-             "source": s,
-             "hash": h or "",
-             "dense_vector": dv} for t, tit, bm25, s, dv, h in zip(texts, title, bm25_text, sources, dense_vectors, hashes)]
-
-        # Убираем дубликаты
-        unique = await self.milvus.ensure_not_duplicate_rows(rows)
-        if not unique:
-            logger.info("Все фрагменты уже в индексе")
-            return
-
-        # Вставка чанками (batch insert)
-        bs = self.config.INDEX_BATCH_SIZE
-        total = 0
-        for i in range(0, len(unique), bs):
-            total += await self.milvus.insert_records(unique[i:i+bs])
-        logger.info("Проиндексировано фрагментов: %d", total)
-
-        # Загружаем коллекцию в память сразу после вставки
-        await self.milvus.client.load_collection(self.milvus.collection_name)
-        logger.info("Коллекция %s загружена в память", self.milvus.collection_name)
+    # ─────────────────────────────────────────────────────────────
+    # Эмбеддинги запроса (с кэшем)
+    # ─────────────────────────────────────────────────────────────
 
     async def _get_embedding_cached(self, query: str) -> Optional[List[float]]:
-        """проверка кэша из Redis"""
         cached = self.embedding_cache.get(query)
         if cached is not None:
             return cached
         try:
-            # Генерируем эмбеддинг для запроса
             emb = await self.embeddings.embed_query(query)
             self.embedding_cache.set(query, emb)
             return emb
@@ -279,12 +335,11 @@ class RAGCore:
             logger.warning("Ошибка эмбеддинга запроса: %s", e)
             return None
 
+    # ─────────────────────────────────────────────────────────────
+    # Ретривер (multi-collection + per-collection threshold + fallback)
+    # ─────────────────────────────────────────────────────────────
+
     def create_retriever(self, k: Optional[int] = None, fetch_k: Optional[int] = None) -> None:
-        """
-        Создаёт асинхронный ретривер:
-        - ищет документы в Milvus
-        - использует кэширование эмбеддингов запросов
-        """
         k = k or self.config.K
         fetch_k = fetch_k or self.config.FETCH_K
 
@@ -294,133 +349,90 @@ class RAGCore:
 
             sid = session_id or "global"
 
-            # Загружаем последнюю коллекцию из Redis (по conversation_id)
-            last = self.collection_manager.load_last_used_collection(session_id=sid)
-
-            # Если follow-up и есть последняя коллекция — используем её
-            if last and self.collection_manager.is_followup_query(query):
-                collection_name = last
-                logger.info("Follow-up запрос (sid=%s) — использую прошлую коллекцию: %s",  sid, collection_name)
-            else:
-                # Иначе обычный routing
-                collection_name = await self.collection_manager.route_query(query)
-                logger.info("RAW QUERY: %s", query)
-                logger.info("Роутер выбрал коллекцию: %s", collection_name)
-                # Сохраняем выбор коллекции в Redis (по conversation_id)
-                self.collection_manager.save_last_used_collection(collection_name, session_id=sid)
-
-
-            # # Определяем коллекцию
-            # collection_name = await self.collection_manager.route_query(query)
-            # if not collection_name:
-            #     logger.warning("Не удалось определить коллекцию для запроса")
-            #     return []
-            # logger.info("Роутер выбрал коллекцию: %s", collection_name)
-
-            # Проверяем и загружаем коллекцию
-            if not await self.milvus.client.has_collection(collection_name):
-                logger.warning("Коллекция %s не найдена", collection_name)
-                return []
-            await self.milvus.ensure_collection_loaded(collection_name)
-
-            # Эмбеддинг
-            dense = await self._get_embedding_cached(query)
-            if dense is None:
+            try:
+                docs = await self.collection_manager.routed_search_with_fallback(
+                    query, conversation_id=sid
+                )
+            except Exception as e:
+                logger.exception("[%s] Ошибка routed_search: %s", sid, e)
                 return []
 
-            # Поиск
-            return await self.milvus.hybrid_search(
-                query_text=query,
-                query_dense=dense,
-                fetch_k=fetch_k,
-                top_k=k,
-                collection_name=collection_name,
-                reranker_endpoint=self.config.RERANKER_BASE_URL
+            logger.info(
+                "[%s] retrieval: docs=%d, collections=%s, scores=%s",
+                sid, len(docs),
+                [d.metadata.get("collection") for d in docs],
+                [round(d.metadata.get("score", 0), 3) for d in docs],
             )
+            return docs
 
-        async def retrieve(query: str) -> List[Document]:
-            if not query.strip():
-                return []
-
-            # Проверяем, что коллекция существует
-            if not await self.milvus.client.has_collection(self.milvus.collection_name):
-                logger.warning("Коллекция %s не найдена", self.milvus.collection_name)
-                return []
-
-            # Подстраховка: загружаем коллекцию перед поиском
-            await self.milvus.ensure_collection_loaded(self.milvus.collection_name)
-
-            dense = await self._get_embedding_cached(query)
-
-            # Делаем гибридный поиск (по вектору + тексту)
-            return await self.milvus.hybrid_search(
-                query_text = query,
-                query_dense = dense,
-                fetch_k = fetch_k,
-                top_k = k,
-                reranker_endpoint = self.config.RERANKER_BASE_URL
-            )
-
-        # self.retriever = retrieve
-        # logger.info("Ретривер создан (k=%d, fetch_k=%d)", k, fetch_k)
         self.retriever = routed_retrieve
         logger.info("Ретривер с маршрутизацией создан (k=%d, fetch_k=%d)", k, fetch_k)
 
-    def _build_context(self, docs: List[Document], session_id: str) -> tuple[str, str]:
+    # ─────────────────────────────────────────────────────────────
+    # Контекст и сообщения
+    # ─────────────────────────────────────────────────────────────
+
+    def _build_context(
+        self,
+        docs: List[Document],
+        history: List[BaseMessage],
+    ) -> tuple[str, List[BaseMessage], str]:
         """
-        Формирует контекст для LLM с учетом:
-          - истории чата (суммаризация старых сообщений при необходимости)
+        Формирует контекст для LLM с учётом:
+          - истории чата (обрезанной по токенам + резюме старых)
           - контекста документов
           - лимита токенов MAX_CONTEXT_TOKENS
           - детерминированного порядка документов
-        Возвращает (context_documents, history_text)
-        """
 
-        # --- История чата ---
-        hist = self.get_history(session_id).get_messages()
-        truncated_history = []
+        Возвращает (context, truncated_history, history_summary).
+        """
+        # История: обрезаем с конца, сохраняя роли
+        truncated_rev: List[BaseMessage] = []
         history_tokens = 0
 
-        # Берём последние сообщения (с конца), чтобы последние важные сообщения вошли
-        for m in reversed(hist):
+        for m in reversed(history):
             msg_text = f"{m.type.capitalize()}: {m.content}"
             tks = count_tokens(msg_text)
             if history_tokens + tks > self.config.MAX_HISTORY_TOKENS:
                 break
-            truncated_history.insert(0, msg_text)  # вставляем в начало
+            truncated_rev.insert(0, m)
             history_tokens += tks
 
-        # Старые сообщения, которые не вошли, суммируем в одно резюме
-        num_skipped = len(hist) - len(truncated_history)
+        truncated_history: List[BaseMessage] = truncated_rev
+
+        # Резюме отброшенных сообщений
+        history_summary = ""
+        num_skipped = len(history) - len(truncated_history)
         if num_skipped > 0:
-            old_msgs = hist[:num_skipped]
+            old_msgs = history[:num_skipped]
             old_text = "\n".join(
                 f"{m.type.capitalize()}: {truncate_text_by_tokens(m.content, 200)}"
                 for m in old_msgs
             )
-            truncated_history.insert(0, f"[Резюме предыдущих сообщений]: {old_text}")
-            history_tokens += count_tokens(truncated_history[0])
+            history_summary = f"[Резюме предыдущих сообщений]: {old_text}"
+            history_tokens += count_tokens(history_summary)
 
-        history_text = "\n".join(truncated_history)
-
-        # --- Доступные токены для документов ---
-        available = self.config.MAX_CONTEXT_TOKENS - self.config.RESERVED_FOR_COMPLETION \
-                    - history_tokens - self.config.RESERVED_FOR_OVERHEAD
+        # Бюджет на документы
+        available = (
+            self.config.MAX_CONTEXT_TOKENS
+            - self.config.RESERVED_FOR_COMPLETION
+            - history_tokens
+            - self.config.RESERVED_FOR_OVERHEAD
+        )
         available = max(0, available)
         if available <= 0:
-            return "", history_text
+            return "", truncated_history, history_summary
 
-        # --- Детерминированная сортировка документов ---
-        # Сначала по score (убывание), затем по source (алфавит) для стабильного порядка
+        # Детерминированная сортировка документов
         docs_sorted = sorted(
             docs,
-            key=lambda d: (-d.metadata.get("score", 0), d.metadata.get("source", ""))
+            key=lambda d: (-d.metadata.get("score", 0), d.metadata.get("source", "")),
         )
 
-        # --- Формирование контекста документов ---
+        # Формирование контекста
         parts, used = [], 0
         for d in docs_sorted:
-            text = f"[Источник: {d.metadata.get('source','N/A')}] {d.page_content.strip()}\n"
+            text = f"[Источник: {d.metadata.get('source', 'N/A')}] {d.page_content.strip()}\n"
             tks = count_tokens(text)
             if used + tks > available:
                 remain = available - used
@@ -431,259 +443,216 @@ class RAGCore:
             used += tks
 
         context = "".join(parts).strip()
-        return context, history_text
+        return context, truncated_history, history_summary
 
-    def _build_prompt(self, mode: str, question: str, context: str, history_text: str) -> str:
+    def _build_messages(
+        self,
+        mode: str,
+        question: str,
+        context: str,
+        truncated_history: List[BaseMessage],
+        history_summary: str = "",
+    ) -> List[BaseMessage]:
         """
-        конструктор промптов в зависимости от режима работы RAG
+        Структура:
+          1) SystemMessage: правила (+ резюме истории)
+          2) truncated_history: user/assistant в исходных ролях
+          3) HumanMessage: контекст + текущий вопрос
         """
+        system_content = self.config.QA_PROMPT_HYBRID_RU_SYSTEM
         if mode == "rag":
-            return self.config.QA_PROMPT_RAG_EN.format(context=context, chat_history=history_text, question=question)
-        elif mode == "hybrid":
-            return self.config.QA_PROMPT_HYBRID_RU.format(context=context, chat_history=history_text, question=question)
+            system_content = getattr(self.config, "QA_PROMPT_RAG_SYSTEM", system_content)
         elif mode == "llm_only":
-            return self.config.QA_PROMPT_LLM_ONLY_EN.format(chat_history=history_text, question=question)
-        else:
-            raise ValueError(f"Неизвестный режим: {mode}")
+            system_content = getattr(self.config, "QA_PROMPT_LLM_ONLY_SYSTEM", system_content)
 
-    def _build_messages(self, mode: str, question: str, context: str, history: List[BaseMessage]) -> List[BaseMessage]:
-        """
-        Собирает структурированный список сообщений для ChatModel.
-        """
-        #TODO
-        # добавить зависимость от режима работы RAG
+        if history_summary:
+            system_content = (
+                f"{system_content}\n\n"
+                f"---\n"
+                f"КОНТЕКСТ ПРЕДЫДУЩЕГО ДИАЛОГА (не факты, только для связности):\n"
+                f"{history_summary}"
+            )
 
-        # Системное сообщение — ТОЛЬКО правила (без {context}!)
+        messages: List[BaseMessage] = [SystemMessage(content=system_content)]
+        messages.extend(truncated_history)
 
-        messages: List[BaseMessage] = [SystemMessage(content=self.config.QA_PROMPT_HYBRID_RU_SYSTEM)]
-
-        # Добавляем контекст как первое user-сообщение
         if context.strip():
-            messages.append(HumanMessage(content=f"Контекст:\n{context}"))
+            user_content = f"Контекст:\n{context}\n\nВопрос: {question}"
+        else:
+            user_content = question
 
-        # Добавляем историю
-        messages.extend(history)
-
-        # Добавляем текущий вопрос
-        messages.append(HumanMessage(content=question))
-
+        messages.append(HumanMessage(content=user_content))
         return messages
+
+    # ─────────────────────────────────────────────────────────────
+    # QA-генератор
+    # ─────────────────────────────────────────────────────────────
 
     def create_qa_generator(self) -> None:
         """
         Создаёт генератор Q&A:
-        - ищет документы
-        - строит контекст
-        - вызывает LLM потоково
-        - сохраняет историю чата
+          - проверяет вежливые фразы
+          - параллельно: поиск документов + загрузка истории
+          - строит контекст по токен-бюджету
+          - стримит ответ LLM
+          - сохраняет в историю
         """
         if not self.retriever:
             raise ValueError("Ретривер не создан. Вызовите create_retriever().")
+
         async def generate_answer_stream(question: str, session_id: str = "default"):
             start_time = time.time()
             logger.debug(f"[{session_id}] 🚀 Начал обработку вопроса: {question[:100]}...")
 
             if not question.strip():
                 logger.warning(f"[{session_id}] Получен пустой вопрос")
-                yield {
-                    "type": "response",  # или "message"
-                    "text": "Пожалуйста, задайте вопрос."
-                }
+                yield {"type": "response", "text": "Пожалуйста, задайте вопрос."}
                 return
 
-            # Проверяем вежливые/служебные фразы
+            # Вежливые/служебные фразы — без LLM
             if PoliteDetector.is_polite(question):
-                yield {
-                    "type": "response",
-                    "text": PoliteDetector.reply(question)
-                }
+                yield {"type": "response", "text": PoliteDetector.reply(question)}
                 return
 
-                # Сразу отдаём первый токен — "отклик"
-            yield {
-                "type": "status",  # или "message"
-                "text": "📚⏳ Думаю над вашим вопросом...\n"
-            }
+            yield {"type": "status", "text": "📚⏳ Думаю над вашим вопросом...\n"}
+            yield {"type": "status", "text": "📚 Ищу документы...\n"}
 
-            # Запускаем асинхронно генерацию эмбеддинга и загрузку истории
-            embedding_start = time.time()
-            embedding_task = asyncio.create_task(self._get_embedding_cached(question))
+            # Параллельно: поиск + загрузка истории
+            search_start = time.time()
+            search_task = asyncio.create_task(self.retriever(question, session_id))
             history_task = asyncio.create_task(
                 asyncio.to_thread(self.get_history(session_id).get_messages)
             )
-            logger.debug(f"[{session_id}] Запустил параллельные задачи: эмбеддинг + история")
+            logger.debug(f"[{session_id}] Запустил параллельные задачи: retrieval + history")
 
-            # Пока ждём эмбеддинг — можно начать формировать часть промпта без контекста
-            yield {
-                "type": "status",  # или "message"
-                "text": "📚 Ищу документы...\n"
-            }
-
-            # Ждём эмбеддинг
             try:
-                dense = await embedding_task
-                embedding_time = time.time() - embedding_start
-                logger.debug(f"[{session_id}] ✅ Эмбеддинг получен за {embedding_time:.2f} сек")
-            except Exception as e:
-                logger.exception(f"[{session_id}] ❌ Ошибка при получении эмбеддинга: {e}")
-                yield {
-                    "type": "error",  # или "message"
-                    "text": "Ошибка при обработке запроса."
-                }
-                return
-
-            if not dense:
-                logger.warning(f"[{session_id}] Эмбеддинг пустой или None")
-                yield {
-                    "type": "error",  # или "message"
-                    "text": "Ошибка при обработке запроса."
-                }
-                return
-
-            # Поиск документов (можно тоже обернуть в таск, если хочешь параллелить с чем-то ещё)
-            search_start = time.time()
-            try:
-                docs = await self.retriever(question, session_id)
+                docs = await search_task
                 search_time = time.time() - search_start
-                logger.debug(f"[{session_id}] ✅ Найдено {len(docs)} документов за {search_time:.2f} сек")
-                # logger.info(f"BLA BLA BLA {docs}")
+                logger.debug(
+                    f"[{session_id}] ✅ Найдено {len(docs)} документов за {search_time:.2f} сек"
+                )
             except Exception as e:
                 logger.exception(f"[{session_id}] ❌ Ошибка поиска: {e}")
-                yield {
-                    "type": "error",  # или "message"
-                    "text": "Ошибка при поиске документов."
-                }
+                yield {"type": "error", "text": "Ошибка при поиске документов."}
                 return
 
             if not docs:
-                logger.debug(f"[{session_id}] ❗ Документы не найдены")
-                yield {
-                    "type": "info",  # или "message"
-                    "text": "Информация не найдена."
-                }
-                return
+                if self.config.MODE == "rag":
+                    logger.debug(f"[{session_id}] ❗ RAG-режим, документов нет")
+                    yield {"type": "info", "text": "Информация не найдена."}
+                    return
+                else:
+                    logger.info(
+                        f"[{session_id}] Нет релевантных документов — "
+                        f"режим {self.config.MODE}, отвечаю из знаний"
+                    )
+                    docs = []
 
-            yield {
-                "type": "status",  # или "message"
-                "text": "✅ Документы найдены. Формирую ответ...\n"
-            }
+            yield {"type": "status", "text": "✅ Документы найдены. Формирую ответ...\n"}
 
             # Ждём историю
             try:
                 hist = await history_task
-                hist_time = time.time() - embedding_start  # с момента запуска задачи
-                logger.debug(f"[{session_id}] ✅ История загружена за {hist_time:.2f} сек, сообщений: {len(hist)}")
+                logger.debug(
+                    f"[{session_id}] ✅ История загружена, сообщений: {len(hist)}"
+                )
             except Exception as e:
                 logger.exception(f"[{session_id}] ❌ Ошибка загрузки истории: {e}")
                 hist = []
 
-            history_text = "\n".join(f"{m.type.capitalize()}: {m.content}" for m in hist)
-
             # Формируем контекст
             context_start = time.time()
             try:
-                context, _ = self._build_context(docs, session_id)
+                context, truncated_history, history_summary = self._build_context(docs, hist)
+
+                logger.info(
+                    f"[{session_id}] retrieval: docs={len(docs)}, "
+                    f"context_chars={len(context)}, "
+                    f"history_msgs={len(truncated_history)}, "
+                    f"has_summary={bool(history_summary)}, "
+                    f"sources={[d.metadata.get('source') for d in docs]}"
+                )
+                for d in docs:
+                    logger.info(
+                        f"  chunk: {d.metadata.get('title')} | {d.page_content[:80]!r}"
+                    )
+
                 context_time = time.time() - context_start
-                context_len = len(context)
                 token_count = count_tokens(context) if context else 0
                 logger.debug(
-                    f"[{session_id}] ✅ Контекст сформирован за {context_time:.2f} сек, токенов: {token_count}, символов: {context_len}")
-                # logger.debug(
-                #     f"[{session_id}] ✅ Контекст: {context}")
-
+                    f"[{session_id}] ✅ Контекст собран за {context_time:.2f} сек, "
+                    f"токенов: {token_count}, символов: {len(context)}"
+                )
             except Exception as e:
                 logger.exception(f"[{session_id}] ❌ Ошибка формирования контекста: {e}")
-                yield {
-                    "type": "error",  # или "message"
-                    "text": "Ошибка при подготовке контекста."
-                }
+                yield {"type": "error", "text": "Ошибка при подготовке контекста."}
                 return
 
             if not context:
-                logger.warning(f"[{session_id}] Контекст пуст после построения")
-                yield {
-                    "type": "error",  # или "message"
-                    "text": "Информация не найдена."
-                }
-                return
+                if self.config.MODE == "rag":
+                    logger.warning(f"[{session_id}] Контекст пуст — RAG-режим")
+                    yield {"type": "error", "text": "Информация не найдена."}
+                    return
+                else:
+                    logger.info(
+                        f"[{session_id}] Контекст пуст — режим {self.config.MODE}, "
+                        f"отвечаю из знаний"
+                    )
 
-            # Генерация ответа LLM
-            history = self.get_history(session_id).get_messages()  # это список BaseMessage
+            # Лог полного контекста
+            logger.info(f"[{session_id}] ПОЛНЫЙ КОНТЕКСТ В LLM:\n{context}")
+
+            # Строим сообщения
             messages = self._build_messages(
                 mode=self.config.MODE,
                 question=question,
                 context=context,
-                history=history
+                truncated_history=truncated_history,
+                history_summary=history_summary,
             )
-
-            # prompt = self._build_prompt(
-            #     mode=self.config.MODE,
-            #     question=question,
-            #     context=context,
-            #     history_text=history_text
-            # )
-
+            logger.info(
+                f"[{session_id}] в LLM: {len(messages)} messages, "
+                f"context_tokens≈{count_tokens(context)}, "
+                f"history_msgs={len(truncated_history)}, "
+                f"has_summary={bool(history_summary)}"
+            )
 
             full = ""
             buffer = ""
             llm_start = time.time()
+            first_token_received = False
+
+            # Опциональный статус, если слотов нет — пользователь понимает, что ждёт
+            if not self.llm_limiter.is_available():
+                yield {"type": "status", "text": "⏳ Ожидаю свободный слот LLM...\n"}
 
             try:
                 logger.debug(f"[{session_id}] 🧠 Начинаю генерацию LLM...")
-                first_token_received = False
-                token_count = 0
 
-                async for chunk in self.llm.astream(messages):
-                # async for chunk in self.llm.astream([{"role": "user", "content": prompt}]):
-                    if content := chunk.content:
-                        if not first_token_received:
-                            first_token_time = time.time() - llm_start
-                            logger.debug(f"[{session_id}] ⚡ Первый токен LLM получен за {first_token_time:.2f} сек")
-                            first_token_received = True
-                            yield {
-                                "type": "status",  # или "message"
-                                "text": "🧠 Генерирую ответ...\n"
-                            }
+                async with self.llm_limiter.acquire(session_id):
+                    async for chunk in self.llm.astream(messages):
+                        if content := chunk.content:
+                            if not first_token_received:
+                                first_token_time = time.time() - llm_start
+                                logger.debug(
+                                    f"[{session_id}] ⚡ Первый токен за {first_token_time:.2f} сек"
+                                )
+                                first_token_received = True
+                                yield {"type": "status", "text": "🧠 Генерирую ответ...\n"}
 
-                        full += content
-                        token_count += 1
+                            full += content
+                            buffer += content
+                            if len(buffer) > 50 or content in ".!?\n":
+                                yield {"type": "response", "text": buffer}
+                                buffer = ""
 
-                        # Отправляем, только если накопилось достаточно или встретили знак препинания
-                        buffer += content
-                        if len(buffer) > 50 or content in ".!?\n":
-                            yield {
-                                "type": "response",  # или "message"
-                                "text": buffer
-                            }
-                            buffer = ""
-
-                # Скидываем остаток
-                if buffer:
-                    yield {
-                        "type": "response",  # или "message"
-                        "text": buffer
-                    }
-
-                total_llm_time = time.time() - llm_start
-                logger.debug(f"[{session_id}] ✅ LLM сгенерировал {token_count} токенов за {total_llm_time:.2f} сек")
-
-                # --- Этап 7: Сохранение в историю ---
-                save_start = time.time()
-                try:
-                    history = self.get_history(session_id)
-                    history.add_message(HumanMessage(content=question))
-                    history.add_message(AIMessage(content=full))
-                    save_time = time.time() - save_start
-                    logger.debug(f"[{session_id}] 💾 Ответ сохранён в историю за {save_time:.2f} сек")
-                except Exception as e:
-                    logger.exception(f"[{session_id}] ❌ Ошибка сохранения в историю: {e}")
-
+            except RateLimitExceeded as e:
+                logger.warning(f"[{session_id}] Rate limit: {e}")
+                yield {"type": "error", "text": str(e)}
+                return
             except Exception as e:
                 logger.exception(f"[{session_id}] ❌ Ошибка при генерации ответа: {e}")
-                yield {
-                    "type": "error",  # или "message"
-                    "text": "Произошла ошибка при генерации ответа."
-                }
+                yield {"type": "error", "text": "Произошла ошибка при генерации ответа."}
 
             total_time = time.time() - start_time
             logger.debug(f"[{session_id}] 🎯 Полное время обработки: {total_time:.2f} сек")
@@ -692,5 +661,12 @@ class RAGCore:
         logger.info("QA-генератор со стримингом и историей настроен")
 
     async def close(self) -> None:
-        # Корректно закрываем соединение с Milvus
         await self.milvus.close()
+        if self._embeddings is not None and hasattr(self._embeddings, "client"):
+            await self._embeddings.client.aclose()
+        if self.embedding_cache is not None:
+            self.embedding_cache.client.close()
+        if self.collection_manager is not None:
+            self.collection_manager.redis.close()
+        if self.history is not None:
+            self.history.redis_client.close()

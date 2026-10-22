@@ -16,3 +16,4 @@ httpx
 redis
 docling
 python-jose[cryptography]
+transformers>=4.40

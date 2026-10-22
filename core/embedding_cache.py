@@ -1,3 +1,5 @@
+# core/embedding_cache.py
+
 import hashlib
 import json
 import redis

@@ -1,3 +1,5 @@
+# api/app.py
+
 import json
 import os
 import logging
@@ -42,7 +44,7 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Инициализация RAGCore...")
     try:
         core = RAGCore(cfg)
-        core.collection_manager = CollectionManager(core)
+        # core.collection_manager = CollectionManager(core)
         # Индексация и создание коллекций
         # await core.collection_manager.build_all_collections()
         await core.collection_manager.build_router()
@@ -77,16 +79,44 @@ class TestRequest(BaseModel):
 # noinspection PyTypeChecker
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # или ["http://localhost:4200"]
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"]
 )
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    checks = {}
+
+    try:
+        await core.milvus.client.list_collections()
+        checks["milvus"] = "ok"
+    except Exception as e:
+        checks["milvus"] = f"error: {e}"
+
+    try:
+        core.collection_manager.redis.ping()
+        checks["redis"] = "ok"
+    except Exception as e:
+        checks["redis"] = f"error: {e}"
+
+    try:
+        r = await core.embeddings.embed_query("ping")
+        checks["embeddings"] = "ok" if r else "empty"
+    except Exception as e:
+        checks["embeddings"] = f"error: {e}"
+
+    # Rate limiter — всегда доступен, но полезно видеть очередь
+    llm_stats = core.llm_limiter.stats()
+    if llm_stats["available_slots"] == 0:
+        checks["llm"] = "saturated"
+    else:
+        checks["llm"] = "ok"
+
+    status = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
+    return {"status": status, "checks": checks, "llm_limiter": llm_stats}
 
 @app.post("/index")
 async def index_all():
@@ -94,19 +124,19 @@ async def index_all():
     await core.setup_vectorstore(docs)
     return {"status": "indexed"}
 
-@app.post("/ask/stream")
-async def ask_stream(req: AskRequest):
-    async def generator():
-        async for chunk in core.qa_chain_with_history(req.question, session_id=req.session_id or "api"):
-            yield chunk
-    # return StreamingResponse(generator(), media_type="text/plain; charset=utf-8")
-    headers = {
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "X-Accel-Buffering": "no",  # важно для nginx
-        "Content-Type": "text/event-stream; charset=utf-8",
-    }
-    return StreamingResponse(generator(), headers=headers)
+# @app.post("/ask/stream")
+# async def ask_stream(req: AskRequest):
+#     async def generator():
+#         async for chunk in core.qa_chain_with_history(req.question, session_id=req.session_id or "api"):
+#             yield chunk
+#     # return StreamingResponse(generator(), media_type="text/plain; charset=utf-8")
+#     headers = {
+#         "Cache-Control": "no-cache",
+#         "Connection": "keep-alive",
+#         "X-Accel-Buffering": "no",  # важно для nginx
+#         "Content-Type": "text/event-stream; charset=utf-8",
+#     }
+#     return StreamingResponse(generator(), headers=headers)
 
 @app.get("/ask/sse")
 async def ask_sse(request: Request, question: str = Query(...), session_id: str = Query("api-sse")):

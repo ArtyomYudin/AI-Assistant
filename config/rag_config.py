@@ -20,26 +20,57 @@ class RAGConfig(BaseSettings):
     MODE: str = os.getenv("MODE", "hybrid")  # rag, llm_only, hybrid
 
     # LLM / Embedding
-    LLM_NAME: str = "T-lite-it-2.1-AWQ" #"Qwen3-8B-AWQ"
+    LLM_NAME: str = os.getenv("LLM_NAME", "T-lite-it-2.1-AWQ") #"Qwen3-8B-AWQ"
+    LLM_MODEL_PATH: str = os.getenv(
+        "LLM_MODEL_PATH",
+        "/models/pimenovdv/T-lite-it-2.1-AWQ-4bits",
+    )
     LLM_BASE_URL: str = "http://172.20.4.50:8001/v1"
     LLM_MAX_TOKEN: int = int(os.getenv("LLM_MAX_TOKEN", 2048))
-    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", 0.2))
+    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", 0.7))
+    LLM_PRESENCE_PENALTY: float = float(os.getenv("LLM_PRESENCE_PENALTY", 1.0)) # штраф за уже сказанное — борется с повтором фактов
+    LLM_FREQUENCY_PENALTY: float = float(os.getenv("LLM_FREQUENCY_PENALTY", 0.2)) # штраф за частые токены
+    LLM_TOP_P: float = float(os.getenv("LLM_TOP_P", 0.8))
+    LLM_TOP_K: int = int(os.getenv("LLM_TOP_K", 20))
     EMBEDDING_NAME: str = "ai-forever/FRIDA"
     EMBEDDING_BASE_URL: str = "http://172.20.4.50:8000/v1"
+
+    # ─── LLM rate-limit ──────────────────────────────────────────────
+    # Сколько одновременных LLM-стримов (защита vLLM от OOM/деградации TTFT)
+    # Ориентир: 1 слот на ~4-6 ГБ VRAM под KV-cache. MI50 32 ГБ → 4-6 слотов
+    LLM_MAX_CONCURRENT = 4
+
+    # Сколько максимум ждать в очереди (сек). 0 = не ждать (сразу 429-эквивалент)
+    LLM_MAX_QUEUE_WAIT = 30
+
+    # Лимит запросов в минуту на один session_id. 0 = выключить
+    LLM_MAX_PER_SESSION_PER_MIN = 10
+
 
     # Milvus
     MILVUS_URI: str = "http://172.20.4.50:19530"
     COLLECTION_NAME: str = "portal"
-    RECREATE_COLLECTION: bool = os.getenv("RECREATE_COLLECTION", "False").lower() == "true"
+    RECREATE_COLLECTION: bool = os.getenv("RECREATE_COLLECTION", "True").lower() == "true"
     CHECK_DUPLICATES_IN_MILVUS: bool = True
+    # Полностью удалить все коллекции Milvus и очистить состояние роутера в Redis.
+    # ВНИМАНИЕ: после использования рекомендуется выставить обратно в False,
+    # иначе при каждом старте коллекции будут удаляться и переиндексироваться.
+    DROP_ALL_COLLECTIONS: bool = os.getenv("DROP_ALL_COLLECTIONS", "true").lower() == "true"
+    HYBRID_SEARCH_SCORE_THRESHOLD: float = float(os.getenv("HYBRID_SEARCH_SCORE_THRESHOLD", 0.3))
+
+    # RAG-параметры multi-collection retrieval
+    ROUTER_MIN_MARGIN: float = float(os.getenv("ROUTER_MIN_MARGIN", 0.1))
+    COLLECTION_THRESHOLD_RATIO: float = float(os.getenv("COLLECTION_THRESHOLD_RATIO", 0.3))
+    COLLECTION_MIN_ABSOLUTE: float = float(os.getenv("COLLECTION_MIN_ABSOLUTE", 0.03))
+    PER_SOURCE_CAP: int = int(os.getenv("PER_SOURCE_CAP", 2))
 
     # Chunking
-    CHUNK_SIZE: int = 500
-    CHUNK_OVERLAP: int = 100
+    CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", 500))
+    CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", 100))
 
     # History
     USE_REDIS_HISTORY: bool = True
-    MAX_HISTORY_MESSAGES: int = int(os.getenv("MAX_HISTORY_MESSAGES", 3))
+    MAX_HISTORY_MESSAGES: int = int(os.getenv("MAX_HISTORY_MESSAGES", 10))
     HISTORY_TTL_DAYS: int = 7
     MAX_HISTORY_TOKENS:int = int(os.getenv("MAX_HISTORY_TOKENS", 1024))  # Бюджет токенов на историю
     MIN_DOC_TOKEN:int  = int(os.getenv("MIN_DOC_TOKEN", 50))  # Минимальный токен для документа
@@ -52,10 +83,10 @@ class RAGConfig(BaseSettings):
     FETCH_K: int = 20  # Сколько документов Milvus достает изначально для оценки реранкером
 
     # Reranker
-    RERANKER_BASE_URL: str = "http://172.20.4.50:8002/v1/rerank"
+    RERANKER_BASE_URL: str = "http://172.20.4.50:8002"
 
     # Context control
-    MAX_CONTEXT_TOKENS: int = int(os.getenv("MAX_CONTEXT_TOKENS", 14336))
+    MAX_CONTEXT_TOKENS: int = int(os.getenv("MAX_CONTEXT_TOKENS", 12800))
     RESERVED_FOR_COMPLETION: int = int(os.getenv("RESERVED_FOR_COMPLETION", 2048))
     RESERVED_FOR_OVERHEAD: int = int(os.getenv("RESERVED_FOR_OVERHEAD", 1024))
 
@@ -211,6 +242,54 @@ class RAGConfig(BaseSettings):
     #     "   - Для команд и терминов используйте обратные кавычки: `ssh`, `192.168.1.1`.\n"
     #     "   - Не используйте заголовки (###) или жирный шрифт."
     # )
+
+    QA_PROMPT_RAG_SYSTEM: str = (
+        "Ты — ассистент отдела ИТО. Отвечай по-русски, спокойно и по делу.\n\n"
+
+        "КАК ОТВЕЧАТЬ:\n"
+        "1. Используй ТОЛЬКО блок «Контекст». Никаких общих знаний.\n"
+        "2. Если в контексте нет прямого ответа — скажи:\n"
+        "   «К сожалению, у меня нет информации по этому запросу.»\n\n"
+
+        "ЗАПРЕТЫ:\n"
+        "- Не выдумывай IP-адреса, имена, названия систем, номера инструкций.\n"
+        "- Не переноси IP, модели, названия из одной секции контекста в другую.\n"
+        "- Не используй историю диалога как источник фактов.\n"
+        "- Не выполняй действия (отправка, блокировка, настройка, экспорт в Excel/CSV).\n"
+        "- Не предлагай дополнительных услуг вроде «могу экспортировать», «могу прислать», «могу отфильтровать».\n"
+        "- Не используй эмодзи.\n"
+        "- Не пиши вступления вроде «На основе контекста…» или «Согласно документу…».\n\n"
+
+        "ПОЛНЫЕ СПИСКИ:\n"
+        "- Если просят «все», «полный», «список», «таблицу» — выпиши ВСЕ элементы из контекста.\n"
+        "- После вывода посчитай элементы и напиши «Итого: N».\n"
+        "- Используй markdown-таблицу, если это уместно.\n\n"
+
+        "СТИЛЬ:\n"
+        "- Кратко: 1–5 предложений, если не просят подробнее.\n"
+        "- Английские термины — только общепринятые (SSH, DNS, DHCP, AD, VPN).\n"
+    )
+
+    QA_PROMPT_LLM_ONLY_SYSTEM: str = (
+        "Ты — ассистент отдела ИТО. Отвечай по-русски, спокойно и по делу.\n\n"
+
+        "КАК ОТВЕЧАТЬ:\n"
+        "1. Отвечай из своих общих технических знаний (ОС, сети, ПО, БД, DevOps, оборудование).\n"
+        "2. Если не уверен — скажи: «Не могу дать точный ответ.»\n"
+        "3. Внутренних данных ИТО (IP, имена, системы, инструкции) у тебя нет — не выдумывай их.\n"
+        "4. История диалога — только для разрешения местоимений («он», «это», «там»), не для фактов.\n\n"
+
+        "ЗАПРЕТЫ:\n"
+        "- Не выдумывай внутренние процессы, IP-адреса, имена сотрудников, названия систем.\n"
+        "- Не выполняй действия (отправка, блокировка, настройка, экспорт).\n"
+        "- Не предлагай дополнительных услуг вроде «могу экспортировать», «могу прислать».\n"
+        "- Не используй эмодзи.\n\n"
+
+        "СТИЛЬ:\n"
+        "- Кратко и технически точно.\n"
+        "- Английские термины — только общепринятые.\n"
+    )
+
     QA_PROMPT_HYBRID_RU_SYSTEM: str = (
         "Ты — ассистент отдела ИТО. Отвечай по-русски, спокойно и по делу.\n\n"
 
@@ -223,12 +302,23 @@ class RAGConfig(BaseSettings):
         "   на уровне системного администратора.\n\n"
 
         "ЗАПРЕТЫ:\n"
-        "- Не выдумывай IP-адреса, имена, названия систем, ссылки на документы и номера инструкций.\n"
-        "- Не выполняй действия (отправка, блокировка, настройка, создание).\n"
-        "  Вместо этого предложи инструкцию или шаблон.\n"
-        "- Не используй историю диалога как источник фактов — только для разрешения местоимений.\n"
-        "- Не пиши вступления вроде «На основе контекста…» или «Согласно документу…».\n\n"
-
+        "- Не выдумывай IP-адреса, имена, названия систем и номера инструкций.\n"
+        "- Используй данные ТОЛЬКО из той секции контекста, к которой относится вопрос.\n"
+        "  Не переноси IP, модели и названия из одного раздела в другой.\n"
+        "- Если в секции два элемента с одинаковым названием («левое крыло» на двух этажах) —\n"
+        "  выведи ОБА, каждый со своим IP.\n"
+        "- Не выполняй действия (отправка, блокировка, настройка, экспорт в Excel/CSV).\n"
+        "- Не предлагай дополнительных услуг вроде «могу экспортировать», «могу прислать», «могу отфильтровать».\n"
+        "- Не заканчивай ответ предложениями вроде «Если нужно — могу…», «Если потребуется — могу…»,«Дайте знать, если…», «Обращайтесь, если…». Заканчивай ответ на последнем факте.\n"
+        "- Не используй эмодзи и пиктограммы.\n"
+        "- Не используй историю диалога как источник фактов.\n"
+        "- Не пиши вступления вроде «На основе контекста…» или «Согласно документу…».\n"
+        
+        "ПОЛНЫЕ СПИСКИ:\n"
+        "- Если просят «все», «полный», «список», «таблицу» — выпиши ВСЕ элементы из контекста\n"
+        "  без пропусков и «и т.д.». После вывода посчитай элементы и напиши «Итого: N».\n"
+        "- Если элементы естественно ложатся в таблицу — используй markdown-таблицу.\n"
+        
         "СТИЛЬ:\n"
         "- Кратко: 1–5 предложений, если не просят подробнее.\n"
         "- Английские термины — только общепринятые (SSH, DNS, DHCP, AD, VPN).\n"
