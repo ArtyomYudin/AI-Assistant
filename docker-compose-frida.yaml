@@ -24,7 +24,6 @@ services:
       --port 8001
       --served-model-name T-lite-it-2.1-AWQ
       --enable-auto-tool-choice
-      --tool-call-parser hermes
     environment:
       - HSA_OVERRIDE_GFX_VERSION=9.0.6    # КРИТИЧНО ДЛЯ MI50
       - ROCR_VISIBLE_DEVICES=0            # Родной синтаксис ROCm
