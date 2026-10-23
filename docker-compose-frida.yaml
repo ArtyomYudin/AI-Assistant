@@ -75,7 +75,7 @@ services:
       - /dev/dri
     group_add:
       - video
-      - render
+#      - render
     cap_add:
       - SYS_PTRACE
     security_opt:
