@@ -94,7 +94,7 @@ class RAGConfig(BaseSettings):
     REDIS_TTL: int = 24 * 3600
 
     # Chat Session
-    JWT_SECRET: str =  "IOH7aLvm5j4EbKvsSjmx3v3PaY1yKss"  # возьми из настроек
+    JWT_SECRET: str = "jdklsfj8ousof4rklckJKjkhRh098jjk"  # возьми из настроек
     JWT_ALGO: str = "HS256"
 
     # GRADIO
