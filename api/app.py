@@ -29,11 +29,6 @@ logger = logging.getLogger(__name__)
 cfg = RAGConfig()
 core: RAGCore | None = None
 
-ALLOWED_ORIGINS = [
-    "http://127.0.0.1:4200",              # дев
-    "https://itsupport.center-inform.ru",  # прод
-]
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -60,8 +55,8 @@ app = FastAPI(title="RAG API (Streaming)", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
