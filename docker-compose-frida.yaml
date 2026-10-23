@@ -54,9 +54,9 @@ services:
       vllm serve /models/pimenovdv/T-lite-it-2.1-AWQ-4bits
       --served-model-name T-lite-it-2.1-AWQ
       --dtype float16
-      --gpu-memory-utilization 0.90
+      --gpu-memory-utilization 0.95
       --max-model-len 16384
-      --max-num-batched-tokens 16384
+      --max-num-batched-tokens 4096
       --max-num-seqs 32
       --enable-prefix-caching
       --port 8001
