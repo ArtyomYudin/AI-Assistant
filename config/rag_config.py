@@ -94,8 +94,8 @@ class RAGConfig(BaseSettings):
     REDIS_TTL: int = 24 * 3600
 
     # Chat Session
-    JWT_SECRET: str = "jdklsfj8ousof4rklckJKjkhRh098jjk"  # возьми из настроек
-    JWT_ALGO: str = "HS256"
+    JWT_SECRET: str = os.getenv("JWT_SECRET", "jdklsfj8ousof4rklckJKjkhRh098jjk")
+    JWT_ALGO: str = os.getenv("JWT_ALGO", "HS256")
 
     # GRADIO
     GRADIO_USER: str = "admin"
