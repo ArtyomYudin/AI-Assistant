@@ -48,13 +48,13 @@ services:
   llm:
     image: unverbraucht/vllm-gfx906:0.32.0-rocm-7.14
     container_name: llm
-      #      --gpu-memory-utilization 0.90
-#      --kv-cache-memory 4676646912
+#      --gpu-memory-utilization 0.90
+#      kv-cache-memory 4500000000  # ~4.19 GiB, компромисс между 3.89 и 4.67
     command: >
       vllm serve /models/pimenovdv/T-lite-it-2.1-AWQ-4bits
       --served-model-name T-lite-it-2.1-AWQ
       --dtype float16
-      --gpu-memory-utilization 0.95
+      --kv-cache-memory 4500000000
       --max-model-len 16384
       --max-num-batched-tokens 4096
       --max-num-seqs 32
