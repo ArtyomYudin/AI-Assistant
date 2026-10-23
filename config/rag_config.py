@@ -38,13 +38,11 @@ class RAGConfig(BaseSettings):
     # ─── LLM rate-limit ──────────────────────────────────────────────
     # Сколько одновременных LLM-стримов (защита vLLM от OOM/деградации TTFT)
     # Ориентир: 1 слот на ~4-6 ГБ VRAM под KV-cache. MI50 32 ГБ → 4-6 слотов
-    LLM_MAX_CONCURRENT = 4
-
+    LLM_MAX_CONCURRENT: int = int(os.getenv("LLM_MAX_CONCURRENT", 4))
     # Сколько максимум ждать в очереди (сек). 0 = не ждать (сразу 429-эквивалент)
-    LLM_MAX_QUEUE_WAIT = 30
-
+    LLM_MAX_QUEUE_WAIT: int = int(os.getenv("LLM_MAX_QUEUE_WAIT", 30))
     # Лимит запросов в минуту на один session_id. 0 = выключить
-    LLM_MAX_PER_SESSION_PER_MIN = 10
+    LLM_MAX_PER_SESSION_PER_MIN: int = int(os.getenv("LLM_MAX_PER_SESSION_PER_MIN", 10))
 
 
     # Milvus
