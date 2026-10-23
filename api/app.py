@@ -151,7 +151,14 @@ async def ask_stream(
                 ensure_ascii=False,
             ) + "\n").encode("utf-8")
 
-    return StreamingResponse(generator(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        generator(),
+        media_type="application/x-ndjson",
+        headers = {
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # ← иначе nginx буферизует
+        },
+    )
 
 
 # ─── Индексация — только админ ───────────────────────────────────

@@ -334,13 +334,15 @@ services:
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=DEBUG
       - MODE=hybrid
-      - MAX_HISTORY_MESSAGES=1
+      - MAX_HISTORY_MESSAGES=4
       - LLM_MAX_TOKEN=2048
       - LLM_TEMPERATURE=0.7
       - MAX_CONTEXT_TOKENS=12800
       - RESERVED_FOR_COMPLETION=2048
     ports:
       - "8008:8008"
+    volumes:
+      - /storage/models/pimenovdv/T-lite-it-2.1-AWQ-4bits:/models/pimenovdv/T-lite-it-2.1-AWQ-4bits:ro
     command: >
       uvicorn api.app:app --host 0.0.0.0 --port 8008 --log-level debug
     depends_on:
@@ -362,13 +364,15 @@ services:
         - PYTHONUNBUFFERED=1
         - LOG_LEVEL=DEBUG
         - MODE=hybrid
-        - MAX_HISTORY_MESSAGES=1
+        - MAX_HISTORY_MESSAGES=4
         - LLM_MAX_TOKEN=2048
         - LLM_TEMPERATURE=0.7
         - MAX_CONTEXT_TOKENS=12800
         - RESERVED_FOR_COMPLETION=2048
       ports:
         - "7860:7860"  # Gradio по умолчанию слушает 7860
+      volumes:
+        - /storage/models/pimenovdv/T-lite-it-2.1-AWQ-4bits:/models/pimenovdv/T-lite-it-2.1-AWQ-4bits:ro
       command: python -m ui.app  # запуск Gradio-приложения
       depends_on:
         - rag-api

@@ -65,18 +65,29 @@ def _load_native_tokenizer():
 
     path = _resolve_model_path()
     if not path:
-        logger.warning(...)
+        logger.warning(
+            "LLM_MODEL_PATH не задан — используется tiktoken fallback. "
+            "Задайте LLM_MODEL_PATH в docker-compose для точного подсчёта токенов."
+        )
         _native_tokenizer_failed = True
         return None
 
     try:
         from transformers import AutoTokenizer
-        _native_tokenizer = AutoTokenizer.from_pretrained(...)
+        _native_tokenizer = AutoTokenizer.from_pretrained(
+            path,
+            trust_remote_code=True,
+            local_files_only=True,
+        )
+        _native_tokenizer_failed = False  # ← сброс флага при успехе
         logger.info("Родной токенизатор загружен: %s", path)
-        _native_tokenizer_failed = False  # ← сбросить флаг при успехе
         return _native_tokenizer
     except Exception as e:
-        logger.warning(...)
+        logger.warning(
+            "Не удалось загрузить родной токенизатор из %s (%s). "
+            "Использую tiktoken с калибровкой под русский.",
+            path, e,
+        )
         _native_tokenizer_failed = True
         return None
 
@@ -196,30 +207,26 @@ def get_current_user(authorization: str = Header(...)):
             raise HTTPException(401, "Invalid auth scheme")
 
         cfg = get_config()
-        payload = jwt.decode(
-            token,
-            cfg.JWT_SECRET,                    # ← экземпляр
-            algorithms=[cfg.JWT_ALGO],         # ← экземпляр
+        logger.info(
+            "JWT verify: secret_len=%d algo=%s token_len=%d",
+            len(cfg.JWT_SECRET), cfg.JWT_ALGO, len(token),
         )
+        payload = jwt.decode(token, cfg.JWT_SECRET, algorithms=[cfg.JWT_ALGO])
 
-        # Терпим разные имена claim'ов: auth-сервисы кладут по-разному
-        sub = (
-            payload.get("sub")
-            or payload.get("user_id")
-            or payload.get("uid")
-            or payload.get("username")
-        )
-        if not sub or not isinstance(sub, str):
-            raise HTTPException(
-                401,
-                f"JWT has no valid user identifier. Claims: {list(payload.keys())}",
-            )
-        return sub
+        sub = payload.get("sub") or payload.get("user_id")
+        if not sub:
+            logger.warning("JWT decoded but no sub: %s", list(payload.keys()))
+            raise HTTPException(401, "JWT has no valid 'sub' claim")
+        return str(sub)
 
     except HTTPException:
-        raise                          # не оборачивать наши 401 в 500
-    except (JWTError, ValueError) as e:
+        raise
+    except JWTError as e:
+        logger.warning("JWT decode failed: %s: %s", type(e).__name__, e)
         raise HTTPException(401, f"Invalid token: {e}")
+    except (ValueError, AttributeError) as e:
+        logger.exception("JWT verify error: %s", e)
+        raise HTTPException(401, "Invalid token")
 
 
 def remove_stopwords_russian(text: str) -> str:
