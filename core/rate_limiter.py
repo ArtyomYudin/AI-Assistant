@@ -10,58 +10,72 @@ logger = logging.getLogger(__name__)
 
 
 class RateLimitExceeded(Exception):
-    """Лимит не получен за отведённое время или превышен per-session лимит."""
+    """Per-user rate limit или таймаут очереди на LLM."""
 
 
 class LLMRateLimiter:
     """
-    Двухуровневый rate-limit для LLM:
+    Двухуровневый rate-limit на LLM.
 
-    1. Concurrent — Semaphore ограничивает число одновременных LLM-стримов.
+    1. Concurrent — Semaphore ограничивает число одновременных стримов.
        Лишние запросы ждут в очереди до max_queue_wait секунд.
-       Защищает vLLM от OOM и деградации TTFT под нагрузкой.
+       Защита vLLM от OOM и деградации TTFT.
 
-    2. Per-session — sliding window на 60 сек по session_id.
-       Защищает от «шумного» пользователя, который бомбит /ask/sse.
+    2. Per-user — sliding window на 60 сек по user_id (sub из JWT).
+       Защита от «шумного» пользователя, который бомбит /ask/sse.
 
-    Служебные эндпоинты (/health, /index) не проходят через limiter.
+    Служебные эндпоинты (/health) не проходят через limiter.
     """
 
     def __init__(
         self,
         max_concurrent: int = 4,
         max_queue_wait: float = 30.0,
-        max_per_session_per_min: int = 10,
+        max_per_user_per_min: int = 10,
     ):
         self._max_concurrent = max_concurrent
         self._sem = asyncio.Semaphore(max_concurrent)
         self._max_queue_wait = max_queue_wait
-        self._max_per_session_per_min = max_per_session_per_min
-        self._session_windows: Dict[str, Deque[float]] = defaultdict(deque)
-        self._session_lock = asyncio.Lock()
+        self._max_per_user_per_min = max_per_user_per_min
 
-    async def _check_session_limit(self, session_id: str) -> None:
-        if self._max_per_session_per_min <= 0:
+        self._user_windows: Dict[str, Deque[float]] = defaultdict(deque)
+        self._windows_lock = asyncio.Lock()
+
+        # Счётчик активных стримов — для is_available()/stats().
+        # Не требует lock: инкремент/декремент без await между ними,
+        # в asyncio это атомарно (single-threaded event loop).
+        self._active: int = 0
+
+    # ─────────────────────────────────────────────────────────────
+    # Per-user rate limit
+    # ─────────────────────────────────────────────────────────────
+
+    async def _check_user_limit(self, user_id: str) -> None:
+        if self._max_per_user_per_min <= 0:
             return  # выключено
 
         now = time.monotonic()
         window_start = now - 60.0
 
-        async with self._session_lock:
-            q = self._session_windows[session_id]
+        async with self._windows_lock:
+            q = self._user_windows[user_id]
             while q and q[0] < window_start:
                 q.popleft()
-            if len(q) >= self._max_per_session_per_min:
+            if len(q) >= self._max_per_user_per_min:
                 raise RateLimitExceeded(
-                    f"Превышен лимит {self._max_per_session_per_min} "
+                    f"Превышен лимит {self._max_per_user_per_min} "
                     f"запросов в минуту. Попробуйте через минуту."
                 )
             q.append(now)
 
+    # ─────────────────────────────────────────────────────────────
+    # Concurrent limit
+    # ─────────────────────────────────────────────────────────────
+
     @asynccontextmanager
-    async def acquire(self, session_id: str = "global"):
-        # 1) Per-session rate limit
-        await self._check_session_limit(session_id)
+    async def acquire(self, user_id: str = "unknown"):
+        # 1) Per-user rate limit
+        await self._check_user_limit(user_id)
 
         # 2) Concurrent limit с очередью
         try:
@@ -70,27 +84,38 @@ class LLMRateLimiter:
             )
         except asyncio.TimeoutError:
             logger.warning(
-                "LLM queue timeout %.1fs (session=%s, max_concurrent=%d)",
-                self._max_queue_wait, session_id, self._max_concurrent,
+                "LLM queue timeout %.1fs (user=%s, max_concurrent=%d)",
+                self._max_queue_wait, user_id, self._max_concurrent,
             )
             raise RateLimitExceeded(
                 f"Сервис перегружен: очередь ожидания LLM превысила "
                 f"{self._max_queue_wait:.0f} сек. Попробуйте через минуту."
             )
 
+        self._active += 1
         try:
             yield
         finally:
+            self._active -= 1
             self._sem.release()
 
+    # ─────────────────────────────────────────────────────────────
+    # Диагностика
+    # ─────────────────────────────────────────────────────────────
+
     def is_available(self) -> bool:
-        """Best-effort проверка для UX (racy, но для статуса хватает)."""
-        return self._sem._value > 0
+        """Best-effort проверка для UX-статуса (racy, но не для логики)."""
+        return self._active < self._max_concurrent
 
     def stats(self) -> dict:
         return {
             "max_concurrent": self._max_concurrent,
-            "available_slots": self._sem._value,
+            "active": self._active,
+            "available_slots": max(0, self._max_concurrent - self._active),
             "max_queue_wait_s": self._max_queue_wait,
-            "max_per_session_per_min": self._max_per_session_per_min,
+            "max_per_user_per_min": self._max_per_user_per_min,
         }
+
+    def reset_user(self, user_id: str) -> None:
+        """Сбрасывает окно rate-limit пользователя (для тестов/админ-действий)."""
+        self._user_windows.pop(user_id, None)

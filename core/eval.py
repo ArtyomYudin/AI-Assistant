@@ -11,25 +11,28 @@ def _coverage(answer: str, expected_keywords: List[str]) -> Tuple[int, int, floa
     score = round(100.0 * found / total, 2)
     return found, total, score, found_map
 
-async def stream_answer_and_evaluate(core, question: str, expected_keywords: List[str], session_id: str = "test") -> AsyncGenerator[str, None]:
+async def stream_answer_and_evaluate(
+    core, question: str, expected_keywords: List[str], session_id: str = "test"
+) -> AsyncGenerator[str, None]:
     start = time.time()
     buffer = ""
     async for chunk in core.qa_chain_with_history(question, session_id=session_id):
-        # buffer += chunk
-        # yield chunk  # пробрасываем стрим наружу
-
-        # --- FIX: chunk может быть dict ---
-        text = chunk.get("text") if isinstance(chunk, dict) else str(chunk)
+        if isinstance(chunk, dict):
+            # Служебные/ошибочные — не идут в coverage
+            if chunk.get("type") in ("error", "status", "info"):
+                yield chunk.get("text", "")
+                continue
+            text = chunk.get("text", "")
+        else:
+            text = str(chunk)
         buffer += text
-        yield text  # пробрасываем наружу только строку
+        yield text
     dur = time.time() - start
     found, total, score, fmap = _coverage(buffer, expected_keywords or [])
-    metrics = {
-        "duration_sec": round(dur, 3),
-        "keywords_total": total,
-        "keywords_found": found,
-        "coverage_percent": score,
-        "found_map": fmap,
-    }
-    # финальный маркер метрик (парсится на клиенте)
-    yield f"\n\n[METRICS]{json.dumps(metrics, ensure_ascii=False)}"
+    yield f"\n\n[METRICS]{json.dumps({
+        'duration_sec': round(dur, 3),
+        'keywords_total': total,
+        'keywords_found': found,
+        'coverage_percent': score,
+        'found_map': fmap,
+    }, ensure_ascii=False)}"

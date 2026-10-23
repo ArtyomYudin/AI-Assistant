@@ -80,7 +80,7 @@ class RAGCore:
         self.llm_limiter = LLMRateLimiter(
             max_concurrent=self.config.LLM_MAX_CONCURRENT,
             max_queue_wait=self.config.LLM_MAX_QUEUE_WAIT,
-            max_per_session_per_min=self.config.LLM_MAX_PER_SESSION_PER_MIN,
+            max_per_user_per_min=self.config.LLM_MAX_PER_USER_PER_MIN,
         )
 
     async def __aenter__(self):
@@ -90,10 +90,11 @@ class RAGCore:
         await self.close()
 
     def __repr__(self):
+        s = self.llm_limiter.stats()
         return (
             f"<RAGCore mode={self.config.MODE}, "
             f"collection={self.config.COLLECTION_NAME}, "
-            f"llm_slots={self.llm_limiter._sem._value}/{self.llm_limiter._max_concurrent}>"
+            f"llm_slots={s['active']}/{s['max_concurrent']}>"
         )
 
     def __str__(self):
@@ -267,51 +268,6 @@ class RAGCore:
         directory = directory or self.config.DATA_DIR
         return load_documents_from_directory(directory)
 
-    async def setup_collection(self, collection_name: str, documents: List[Document]):
-        milvus = MilvusManager(
-            uri=self.config.MILVUS_URI,
-            collection_name=collection_name,
-            recreate=self.config.RECREATE_COLLECTION,
-        )
-
-        processed = self.splitters.split_by_headers(documents)
-        if not processed:
-            return
-
-        texts = [
-            f"{d.metadata.get('title', '')}. {d.page_content}".strip(". ")
-            for d in processed
-        ]
-        titles = [d.metadata.get("title") for d in processed]
-        bm25_t = [d.metadata.get("bm25_text") for d in processed]
-        sources = [d.metadata.get("source", "N/A") for d in processed]
-        hashes = [d.metadata.get("hash") for d in processed]
-
-        dense_vectors = await self.embeddings.embed_documents(texts)
-        dim = len(dense_vectors[0])
-
-        await milvus.create_collection_if_needed(dense_dim=dim)
-
-        rows = [
-            {
-                "text": t,
-                "title": tit,
-                "bm25_text": b25,
-                "source": s,
-                "hash": h,
-                "dense_vector": dv,
-            }
-            for t, tit, b25, s, dv, h in zip(
-                texts, titles, bm25_t, sources, dense_vectors, hashes
-            )
-        ]
-
-        unique = await milvus.ensure_not_duplicate_rows(rows)
-        for i in range(0, len(unique), self.config.INDEX_BATCH_SIZE):
-            await milvus.insert_records(unique[i:i + self.config.INDEX_BATCH_SIZE])
-
-        await milvus.client.load_collection(collection_name)
-        logger.info("Коллекция %s загружена в память", collection_name)
 
     async def setup_vectorstore(self, documents: List[Document]) -> None:
         """Индексирует документы в основную коллекцию (config.COLLECTION_NAME)."""
@@ -500,12 +456,12 @@ class RAGCore:
         if not self.retriever:
             raise ValueError("Ретривер не создан. Вызовите create_retriever().")
 
-        async def generate_answer_stream(question: str, session_id: str = "default"):
+        async def generate_answer_stream(question: str, user_id: str = "default"):
             start_time = time.time()
-            logger.debug(f"[{session_id}] 🚀 Начал обработку вопроса: {question[:100]}...")
+            logger.debug(f"[{user_id}] 🚀 Начал обработку вопроса: {question[:100]}...")
 
             if not question.strip():
-                logger.warning(f"[{session_id}] Получен пустой вопрос")
+                logger.warning(f"[{user_id}] Получен пустой вопрос")
                 yield {"type": "response", "text": "Пожалуйста, задайте вопрос."}
                 return
 
@@ -519,31 +475,31 @@ class RAGCore:
 
             # Параллельно: поиск + загрузка истории
             search_start = time.time()
-            search_task = asyncio.create_task(self.retriever(question, session_id))
+            search_task = asyncio.create_task(self.retriever(question, user_id))
             history_task = asyncio.create_task(
-                asyncio.to_thread(self.get_history(session_id).get_messages)
+                asyncio.to_thread(self.get_history(user_id).get_messages)
             )
-            logger.debug(f"[{session_id}] Запустил параллельные задачи: retrieval + history")
+            logger.debug(f"[{user_id}] Запустил параллельные задачи: retrieval + history")
 
             try:
                 docs = await search_task
                 search_time = time.time() - search_start
                 logger.debug(
-                    f"[{session_id}] ✅ Найдено {len(docs)} документов за {search_time:.2f} сек"
+                    f"[{user_id}] ✅ Найдено {len(docs)} документов за {search_time:.2f} сек"
                 )
             except Exception as e:
-                logger.exception(f"[{session_id}] ❌ Ошибка поиска: {e}")
+                logger.exception(f"[{user_id}] ❌ Ошибка поиска: {e}")
                 yield {"type": "error", "text": "Ошибка при поиске документов."}
                 return
 
             if not docs:
                 if self.config.MODE == "rag":
-                    logger.debug(f"[{session_id}] ❗ RAG-режим, документов нет")
+                    logger.debug(f"[{user_id}] ❗ RAG-режим, документов нет")
                     yield {"type": "info", "text": "Информация не найдена."}
                     return
                 else:
                     logger.info(
-                        f"[{session_id}] Нет релевантных документов — "
+                        f"[{user_id}] Нет релевантных документов — "
                         f"режим {self.config.MODE}, отвечаю из знаний"
                     )
                     docs = []
@@ -554,10 +510,10 @@ class RAGCore:
             try:
                 hist = await history_task
                 logger.debug(
-                    f"[{session_id}] ✅ История загружена, сообщений: {len(hist)}"
+                    f"[{user_id}] ✅ История загружена, сообщений: {len(hist)}"
                 )
             except Exception as e:
-                logger.exception(f"[{session_id}] ❌ Ошибка загрузки истории: {e}")
+                logger.exception(f"[{user_id}] ❌ Ошибка загрузки истории: {e}")
                 hist = []
 
             # Формируем контекст
@@ -566,7 +522,7 @@ class RAGCore:
                 context, truncated_history, history_summary = self._build_context(docs, hist)
 
                 logger.info(
-                    f"[{session_id}] retrieval: docs={len(docs)}, "
+                    f"[{user_id}] retrieval: docs={len(docs)}, "
                     f"context_chars={len(context)}, "
                     f"history_msgs={len(truncated_history)}, "
                     f"has_summary={bool(history_summary)}, "
@@ -580,27 +536,27 @@ class RAGCore:
                 context_time = time.time() - context_start
                 token_count = count_tokens(context) if context else 0
                 logger.debug(
-                    f"[{session_id}] ✅ Контекст собран за {context_time:.2f} сек, "
+                    f"[{user_id}] ✅ Контекст собран за {context_time:.2f} сек, "
                     f"токенов: {token_count}, символов: {len(context)}"
                 )
             except Exception as e:
-                logger.exception(f"[{session_id}] ❌ Ошибка формирования контекста: {e}")
+                logger.exception(f"[{user_id}] ❌ Ошибка формирования контекста: {e}")
                 yield {"type": "error", "text": "Ошибка при подготовке контекста."}
                 return
 
             if not context:
                 if self.config.MODE == "rag":
-                    logger.warning(f"[{session_id}] Контекст пуст — RAG-режим")
+                    logger.warning(f"[{user_id}] Контекст пуст — RAG-режим")
                     yield {"type": "error", "text": "Информация не найдена."}
                     return
                 else:
                     logger.info(
-                        f"[{session_id}] Контекст пуст — режим {self.config.MODE}, "
+                        f"[{user_id}] Контекст пуст — режим {self.config.MODE}, "
                         f"отвечаю из знаний"
                     )
 
             # Лог полного контекста
-            logger.info(f"[{session_id}] ПОЛНЫЙ КОНТЕКСТ В LLM:\n{context}")
+            logger.info(f"[{user_id}] ПОЛНЫЙ КОНТЕКСТ В LLM:\n{context}")
 
             # Строим сообщения
             messages = self._build_messages(
@@ -611,7 +567,7 @@ class RAGCore:
                 history_summary=history_summary,
             )
             logger.info(
-                f"[{session_id}] в LLM: {len(messages)} messages, "
+                f"[{user_id}] в LLM: {len(messages)} messages, "
                 f"context_tokens≈{count_tokens(context)}, "
                 f"history_msgs={len(truncated_history)}, "
                 f"has_summary={bool(history_summary)}"
@@ -622,20 +578,19 @@ class RAGCore:
             llm_start = time.time()
             first_token_received = False
 
-            # Опциональный статус, если слотов нет — пользователь понимает, что ждёт
             if not self.llm_limiter.is_available():
                 yield {"type": "status", "text": "⏳ Ожидаю свободный слот LLM...\n"}
 
             try:
-                logger.debug(f"[{session_id}] 🧠 Начинаю генерацию LLM...")
+                logger.debug(f"[{user_id}] 🧠 Начинаю генерацию LLM...")
 
-                async with self.llm_limiter.acquire(session_id):
+                async with self.llm_limiter.acquire(user_id=user_id):
                     async for chunk in self.llm.astream(messages):
                         if content := chunk.content:
                             if not first_token_received:
                                 first_token_time = time.time() - llm_start
                                 logger.debug(
-                                    f"[{session_id}] ⚡ Первый токен за {first_token_time:.2f} сек"
+                                    f"[{user_id}] ⚡ Первый токен за {first_token_time:.2f} сек"
                                 )
                                 first_token_received = True
                                 yield {"type": "status", "text": "🧠 Генерирую ответ...\n"}
@@ -646,27 +601,78 @@ class RAGCore:
                                 yield {"type": "response", "text": buffer}
                                 buffer = ""
 
+                # ★ Сброс остатка — иначе теряются последние <50 символов
+                if buffer:
+                    yield {"type": "response", "text": buffer}
+
             except RateLimitExceeded as e:
-                logger.warning(f"[{session_id}] Rate limit: {e}")
+                logger.warning(f"[{user_id}] Rate limit: {e}")
                 yield {"type": "error", "text": str(e)}
                 return
+
             except Exception as e:
-                logger.exception(f"[{session_id}] ❌ Ошибка при генерации ответа: {e}")
+                logger.exception(f"[{user_id}] ❌ Ошибка при генерации ответа: {e}")
                 yield {"type": "error", "text": "Произошла ошибка при генерации ответа."}
+                return
+
+            # ★ Сохранение в историю — иначе диалог не помнит контекст
+            if full.strip():
+                save_start = time.time()
+                try:
+                    history = self.get_history(user_id)
+                    history.add_message(HumanMessage(content=question))
+                    history.add_message(AIMessage(content=full))
+                    save_time = time.time() - save_start
+                    logger.debug(
+                        f"[{user_id}] 💾 Ответ сохранён в историю за {save_time:.2f} сек"
+                    )
+                except Exception as e:
+                    logger.exception(f"[{user_id}] ❌ Ошибка сохранения истории: {e}")
 
             total_time = time.time() - start_time
-            logger.debug(f"[{session_id}] 🎯 Полное время обработки: {total_time:.2f} сек")
+            logger.debug(f"[{user_id}] 🎯 Полное время обработки: {total_time:.2f} сек")
+
 
         self.qa_chain_with_history = generate_answer_stream
         logger.info("QA-генератор со стримингом и историей настроен")
 
+
     async def close(self) -> None:
         await self.milvus.close()
+
         if self._embeddings is not None and hasattr(self._embeddings, "client"):
-            await self._embeddings.client.aclose()
+            try:
+                await self._embeddings.client.aclose()
+            except Exception as e:
+                logger.warning("Ошибка при закрытии embeddings: %s", e)
+
+        if self._llm is not None:
+            # ChatOpenAI использует httpx.AsyncClient внутри _async_client
+            for attr in ("_async_client", "client"):
+                c = getattr(self._llm, attr, None)
+                if c is not None and hasattr(c, "aclose"):
+                    try:
+                        await c.aclose()
+                    except Exception as e:
+                        logger.warning("Ошибка при закрытии LLM-клиента: %s", e)
+                    break
+
         if self.embedding_cache is not None:
-            self.embedding_cache.client.close()
+            try:
+                self.embedding_cache.client.close()
+            except Exception:
+                pass
+
         if self.collection_manager is not None:
-            self.collection_manager.redis.close()
+            try:
+                self.collection_manager.redis.close()
+            except Exception:
+                pass
+
         if self.history is not None:
-            self.history.redis_client.close()
+            try:
+                self.history.redis_client.close()
+            except Exception:
+                pass
+
+        logger.info("RAGCore: все ресурсы закрыты")

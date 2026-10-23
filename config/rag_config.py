@@ -41,8 +41,8 @@ class RAGConfig(BaseSettings):
     LLM_MAX_CONCURRENT: int = int(os.getenv("LLM_MAX_CONCURRENT", 4))
     # Сколько максимум ждать в очереди (сек). 0 = не ждать (сразу 429-эквивалент)
     LLM_MAX_QUEUE_WAIT: int = int(os.getenv("LLM_MAX_QUEUE_WAIT", 30))
-    # Лимит запросов в минуту на один session_id. 0 = выключить
-    LLM_MAX_PER_SESSION_PER_MIN: int = int(os.getenv("LLM_MAX_PER_SESSION_PER_MIN", 10))
+    # Лимит запросов в минуту на один user_id. 0 = выключить
+    LLM_MAX_PER_USER_PER_MIN: int = int(os.getenv("LLM_MAX_PER_USER_PER_MIN", 10))
 
 
     # Milvus
@@ -96,6 +96,11 @@ class RAGConfig(BaseSettings):
     # Chat Session
     JWT_SECRET: str =  "IOH7aLvm5j4EbKvsSjmx3v3PaY1yKss"  # возьми из настроек
     JWT_ALGO: str = "HS256"
+
+    # GRADIO
+    GRADIO_USER: str = "admin"
+    GRADIO_PASSWORD: str = "admin"
+    GRADIO_DEBUG: bool = True  # false на «почти-проде», true при активной разработке
 
     # PROMPTS
     GENERAL_PROMPT: str = (

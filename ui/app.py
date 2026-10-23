@@ -1,121 +1,132 @@
-import gradio as gr
+# gradio/app.py
+import os
 import json
-from typing import List
+import uuid
 
-from langchain_core.messages import HumanMessage, AIMessage
+import gradio as gr
 
 from config.rag_config import RAGConfig
-from core.collection_manager import CollectionManager
 from core.rag_core import RAGCore
-from core.eval import stream_answer_and_evaluate
-from core.chat_history import RedisChatHistory
 
-# --- Глобальный core (инициализация внутри async) ---
 cfg = RAGConfig()
 core: RAGCore | None = None
 
+DEBUG = cfg.GRADIO_DEBUG
+GRADIO_USER = cfg.GRADIO_USER
+GRADIO_PASSWORD = cfg.GRADIO_PASSWORD
 
-# --- Асинхронная инициализация RAG ---
+
+# ─── Инициализация ─────────────────────────────────────────────
 async def init_rag():
     global core
     if core is None:
-        core = RAGCore(cfg)
-        core.collection_manager = CollectionManager(core)
-        # await core.collection_manager.build_all_collections()
+        core = RAGCore(cfg)                        # CollectionManager внутри
         await core.collection_manager.build_router()
         core.create_retriever(k=cfg.K, fetch_k=cfg.FETCH_K)
         core.create_qa_generator()
     return core
 
-def load_history(session_id="gradio"):
-    store = RedisChatHistory(host="172.20.4.50", session_id=session_id)
-    msgs = store.get_messages()
 
-    history = []
-    for m in msgs:
-        if m.type == "human":
-            history.append({"role": "user", "content": m.content})
-        elif m.type == "ai":
-            history.append({"role": "assistant", "content": m.content})
-    return history
+def new_session_id() -> str:
+    return f"gradio_{uuid.uuid4().hex[:12]}"
 
-# --- Стриминговый диалог ---
-async def chat_answer_stream(message, history, session_id="gradio"):
+
+# ─── Диалог ───────────────────────────────────────────────────
+async def chat_answer_stream(message: str, history: list, session_id: str):
+    if not session_id:
+        session_id = new_session_id()
     rag = await init_rag()
 
-    full_response = ""
+    full = ""
     buffer = ""
     async for chunk in rag.qa_chain_with_history(message, session_id=session_id):
-        # --- FIX: chunk может быть dict ---
         text = chunk.get("text") if isinstance(chunk, dict) else str(chunk)
-
         buffer += text
-        # отдаём партиями, например каждые 10 символов
         if len(buffer) >= 10:
-            full_response += buffer
+            full += buffer
             buffer = ""
-            yield full_response
-
+            yield full
     if buffer:
-        full_response += buffer
-        yield full_response
+        full += buffer
+        yield full
 
 
-# --- Стриминговый тест с метриками ---
-async def test_answer_stream(message, keywords_csv, history, session_id="gradio-test"):
+# ─── Тестовый вопрос с метриками (только при DEBUG=true) ──────
+async def test_answer_stream(message: str, keywords_csv: str, session_id: str):
+    from core.eval import stream_answer_and_evaluate   # ленивый импорт
+
+    if not session_id:
+        session_id = new_session_id()
     rag = await init_rag()
-
     expected = [k.strip() for k in (keywords_csv or "").split(",") if k.strip()]
-    full_response = ""
-    buffer = ""
 
-    async for chunk in stream_answer_and_evaluate(rag, message, expected, session_id=session_id):
-        if "[METRICS]" in chunk:
-            parts = chunk.split("[METRICS]", 1)
-            text_part = parts[0]
-            metrics_part = parts[1] if len(parts) > 1 else ""
-
-            if text_part:
-                buffer += text_part
-                full_response += buffer
-                buffer = ""
-
+    full = ""
+    async for part in stream_answer_and_evaluate(
+        rag, message, expected, session_id=session_id
+    ):
+        if "[METRICS]" in part:
+            text_part, metrics_part = part.split("[METRICS]", 1)
+            full += text_part
             try:
-                metrics = json.loads(metrics_part.strip())
-                pretty = (f"\n\n⏱ {metrics['duration_sec']}s  |  "
-                          f"Ключевые слова: {metrics['keywords_found']}/{metrics['keywords_total']}  |  "
-                          f"Покрытие: {metrics['coverage_percent']}%\n"
-                          f"Детали: {metrics['found_map']}")
-                yield full_response + pretty
+                m = json.loads(metrics_part.strip())
+                pretty = (
+                    f"\n\n⏱ {m['duration_sec']}s | "
+                    f"Ключевые: {m['keywords_found']}/{m['keywords_total']} | "
+                    f"Покрытие: {m['coverage_percent']}%\n"
+                    f"Детали: {m['found_map']}"
+                )
+                yield full + pretty
             except Exception:
-                yield full_response + "\n\n[Не удалось распарсить метрики]"
+                yield full + "\n\n[Не удалось распарсить метрики]"
         else:
-            # buffer += chunk
-            text = chunk.get("text") if isinstance(chunk, dict) else str(chunk)
-            buffer += text
-            if len(buffer) >= 10:
-                full_response += buffer
-                buffer = ""
-                yield full_response
-
-    if buffer:
-        full_response += buffer
-        yield full_response
+            full += part
+            yield full
 
 
-# --- Интерфейс Gradio ---
-with gr.Blocks(title="RAG — Streaming UI") as demo:
-    gr.Markdown("## 🔎 RAG QA (Streaming)")
+# ─── UI ───────────────────────────────────────────────────────
+with gr.Blocks(title="RAG — Internal UI") as demo:
+    gr.Markdown("## 🔎 RAG QA — внутренний инструмент")
+    gr.Markdown(
+        "⚠️ Только для разработчиков и тестирования. "
+        "Продовый RAG — через `/ask/sse` с JWT."
+    )
+
+    sid_state = gr.State()
+    # Инициализируем уникальный session_id на каждую сессию браузера
+    demo.load(fn=new_session_id, inputs=None, outputs=sid_state)
+
     with gr.Tab("Диалог"):
-        chat = gr.ChatInterface(fn=chat_answer_stream, title="QA")
-        # # при загрузке UI — подтягиваем Redis-историю
-        # demo.load(lambda: load_history("gradio"), None, chat.chatbot)
-    with gr.Tab("Тестовый вопрос"):
-        prompt = gr.Textbox(label="Вопрос")
-        keywords = gr.Textbox(label="Ожидаемые ключевые слова (через запятую)")
-        out = gr.Textbox(label="Стрим ответа + метрики", lines=12)
-        btn = gr.Button("Проверить и стримить ответ")
-        btn.click(fn=test_answer_stream, inputs=[prompt, keywords, out], outputs=out)
+        gr.ChatInterface(
+            fn=chat_answer_stream,
+            additional_inputs=[sid_state],
+            title="QA",
+        )
+
+    if DEBUG:
+        with gr.Tab("Тестовый вопрос (DEBUG)"):
+            prompt = gr.Textbox(label="Вопрос")
+            keywords = gr.Textbox(
+                label="Ожидаемые ключевые слова (через запятую)",
+                placeholder="172.20.58.11, E12A, левое крыло",
+            )
+            out = gr.Textbox(label="Стрим ответа + метрики", lines=12)
+            btn = gr.Button("Проверить и стримить")
+            btn.click(
+                fn=test_answer_stream,
+                inputs=[prompt, keywords, sid_state],
+                outputs=out,
+            )
+
 
 if __name__ == "__main__":
-    demo.queue().launch(server_name="0.0.0.0", server_port=7860)
+    launch_kwargs = {
+        "server_name": "127.0.0.1",   # ← только localhost
+        "server_port": 7860,
+    }
+    if GRADIO_USER and GRADIO_PASSWORD:
+        launch_kwargs["auth"] = [(GRADIO_USER, GRADIO_PASSWORD)]
+        print(f"🔐 Basic-auth включён для {GRADIO_USER}")
+    else:
+        print("⚠️ GRADIO_USER/GRADIO_PASSWORD не заданы — запуск без auth (только localhost)")
+
+    demo.queue().launch(**launch_kwargs)

@@ -8,6 +8,9 @@ from typing import Optional
 import tiktoken
 from fastapi import HTTPException, Header
 from jose import jwt, JWTError
+from functools import lru_cache
+from config.rag_config import RAGConfig
+import time as _time
 
 import config.rag_config
 
@@ -21,6 +24,12 @@ _fallback_tokenizer = None
 _last_attempt = 0.0
 RETRY_INTERVAL = 60.0
 
+
+@lru_cache(maxsize=1)
+def get_config() -> RAGConfig:
+    """Единый экземпляр RAGConfig (BaseSettings читает .env — дорого)."""
+    return RAGConfig()
+
 def _resolve_model_path() -> Optional[str]:
     """
     Определяет путь к папке модели по приоритету:
@@ -33,17 +42,9 @@ def _resolve_model_path() -> Optional[str]:
         return path
 
     try:
-        path = getattr(config.rag_config.RAGConfig, "LLM_MODEL_PATH", None)
+        return get_config().LLM_MODEL_PATH
     except Exception:
-        path = None
-
-    if not path:
-        try:
-            path = config.rag_config.RAGConfig().LLM_MODEL_PATH
-        except Exception:
-            path = None
-
-    return path
+        return None
 
 
 def _load_native_tokenizer():
@@ -52,37 +53,30 @@ def _load_native_tokenizer():
     При первой ошибке выставляет флаг _native_tokenizer_failed,
     чтобы не пытаться снова на каждый вызов.
     """
-    global _native_tokenizer, _native_tokenizer_failed
+    global _native_tokenizer, _native_tokenizer_failed, _last_attempt
 
     if _native_tokenizer is not None:
         return _native_tokenizer
-    if _native_tokenizer_failed:
+
+    now = _time.monotonic()
+    if _native_tokenizer_failed and (now - _last_attempt) < RETRY_INTERVAL:
         return None
+    _last_attempt = now
 
     path = _resolve_model_path()
     if not path:
-        logger.warning(
-            "LLM_MODEL_PATH не задан — используется tiktoken fallback. "
-            "Задайте LLM_MODEL_PATH в docker-compose для точного подсчёта токенов."
-        )
+        logger.warning(...)
         _native_tokenizer_failed = True
         return None
 
     try:
         from transformers import AutoTokenizer
-        _native_tokenizer = AutoTokenizer.from_pretrained(
-            path,
-            trust_remote_code=True,
-            local_files_only=True,   # запрещаем ходить в HF Hub
-        )
+        _native_tokenizer = AutoTokenizer.from_pretrained(...)
         logger.info("Родной токенизатор загружен: %s", path)
+        _native_tokenizer_failed = False  # ← сбросить флаг при успехе
         return _native_tokenizer
     except Exception as e:
-        logger.warning(
-            "Не удалось загрузить родной токенизатор из %s (%s). "
-            "Использую tiktoken с калибровкой под русский.",
-            path, e,
-        )
+        logger.warning(...)
         _native_tokenizer_failed = True
         return None
 
@@ -194,15 +188,39 @@ def normalize_score(score: float, ranked_by: str) -> float:
     except Exception:
         return 0.0
 
+
 def get_current_user(authorization: str = Header(...)):
     try:
         scheme, token = authorization.split()
         if scheme.lower() != "bearer":
-            raise HTTPException(status_code=401, detail="Invalid auth scheme")
-        payload = jwt.decode(token, config.rag_config.RAGConfig.JWT_SECRET, algorithms=[config.rag_config.RAGConfig.JWT_ALGO])
-        return payload.get("sub")
-    except (JWTError, ValueError):
-        raise HTTPException(status_code=401, detail="Invalid token")
+            raise HTTPException(401, "Invalid auth scheme")
+
+        cfg = get_config()
+        payload = jwt.decode(
+            token,
+            cfg.JWT_SECRET,                    # ← экземпляр
+            algorithms=[cfg.JWT_ALGO],         # ← экземпляр
+        )
+
+        # Терпим разные имена claim'ов: auth-сервисы кладут по-разному
+        sub = (
+            payload.get("sub")
+            or payload.get("user_id")
+            or payload.get("uid")
+            or payload.get("username")
+        )
+        if not sub or not isinstance(sub, str):
+            raise HTTPException(
+                401,
+                f"JWT has no valid user identifier. Claims: {list(payload.keys())}",
+            )
+        return sub
+
+    except HTTPException:
+        raise                          # не оборачивать наши 401 в 500
+    except (JWTError, ValueError) as e:
+        raise HTTPException(401, f"Invalid token: {e}")
+
 
 def remove_stopwords_russian(text: str) -> str:
     """Удаляет стоп-слова из текста для BM25-поиска."""
