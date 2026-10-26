@@ -54,10 +54,10 @@ services:
       vllm serve /models/pimenovdv/T-lite-it-2.1-AWQ-4bits
       --served-model-name T-lite-it-2.1-AWQ
       --dtype float16
-      --kv-cache-memory 4676646912
-      --max-model-len 16384
-      --max-num-batched-tokens 16384
-      --max-num-seqs 32
+      --gpu-memory-utilization 0.90
+      --max-model-len 8192
+      --max-num-batched-tokens 8192
+      --max-num-seqs 16
       --enable-prefix-caching
       --port 8001
       --enable-auto-tool-choice
