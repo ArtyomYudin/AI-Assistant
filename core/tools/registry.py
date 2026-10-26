@@ -6,7 +6,7 @@ from core.tools.kb_tool import KB_TOOLS, search_knowledge_base
 # Все схемы, которые передаём в LLM
 ALL_TOOLS = [
     *WEATHER_TOOLS,
-    *KB_TOOLS,
+    # *KB_TOOLS,
     # сюда добавляй другие *_TOOLS по мере роста
     # *VLAN_TOOLS,
     # *IP_TOOLS,
@@ -16,6 +16,6 @@ ALL_TOOLS = [
 # Имена → вызываемые функции
 TOOL_REGISTRY = {
     "get_weather": get_weather,
-    "search_knowledge_base": search_knowledge_base,
+    # "search_knowledge_base": search_knowledge_base,
     # "lookup_vlan": lookup_vlan,
 }

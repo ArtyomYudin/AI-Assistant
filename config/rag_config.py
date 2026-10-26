@@ -28,7 +28,7 @@ class RAGConfig(BaseSettings):
     LLM_BASE_URL: str = "http://172.20.4.50:8001/v1"
     LLM_MAX_TOKEN: int = int(os.getenv("LLM_MAX_TOKEN", 2048))
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", 0.7))
-    LLM_PRESENCE_PENALTY: float = float(os.getenv("LLM_PRESENCE_PENALTY", 1.0)) # штраф за уже сказанное — борется с повтором фактов
+    LLM_PRESENCE_PENALTY: float = float(os.getenv("LLM_PRESENCE_PENALTY", 0.4)) # штраф за уже сказанное — борется с повтором фактов
     LLM_FREQUENCY_PENALTY: float = float(os.getenv("LLM_FREQUENCY_PENALTY", 0.2)) # штраф за частые токены
     LLM_TOP_P: float = float(os.getenv("LLM_TOP_P", 0.8))
     LLM_TOP_K: int = int(os.getenv("LLM_TOP_K", 20))
@@ -36,10 +36,10 @@ class RAGConfig(BaseSettings):
     EMBEDDING_BASE_URL: str = "http://172.20.4.50:8000/v1"
 
     # ─── LLM rate-limit ──────────────────────────────────────────────
-    # Сколько одновременных LLM-стримов (защита vLLM от OOM/деградации TTFT)
-    # Ориентир: 1 слот на ~4-6 ГБ VRAM под KV-cache. MI50 32 ГБ → 4-6 слотов
-    LLM_MAX_CONCURRENT: int = int(os.getenv("LLM_MAX_CONCURRENT", 4))
-    # Сколько максимум ждать в очереди (сек). 0 = не ждать (сразу 429-эквивалент)
+    # (Оптимизировано под MI50 16GB / 8k контекст)
+    # Разрешаем 2 параллельных потока генерации (оптимально для объема кэша 8k)
+    LLM_MAX_CONCURRENT: int = int(os.getenv("LLM_MAX_CONCURRENT", 2))
+    # Время ожидания в очереди. При 8k генерация быстрее, 30 сек более чем достаточно
     LLM_MAX_QUEUE_WAIT: int = int(os.getenv("LLM_MAX_QUEUE_WAIT", 30))
     # Лимит запросов в минуту на один user_id. 0 = выключить
     LLM_MAX_PER_USER_PER_MIN: int = int(os.getenv("LLM_MAX_PER_USER_PER_MIN", 10))
@@ -48,7 +48,8 @@ class RAGConfig(BaseSettings):
     # Milvus
     MILVUS_URI: str = "http://172.20.4.50:19530"
     COLLECTION_NAME: str = "portal"
-    RECREATE_COLLECTION: bool = os.getenv("RECREATE_COLLECTION", "True").lower() == "true"
+    # Безопасное значение по умолчанию во избежание случайной очистки прод-базы
+    RECREATE_COLLECTION: bool = os.getenv("RECREATE_COLLECTION", "False").lower() == "true"
     CHECK_DUPLICATES_IN_MILVUS: bool = True
     # Полностью удалить все коллекции Milvus и очистить состояние роутера в Redis.
     # ВНИМАНИЕ: после использования рекомендуется выставить обратно в False,
@@ -68,7 +69,7 @@ class RAGConfig(BaseSettings):
 
     # History
     USE_REDIS_HISTORY: bool = True
-    MAX_HISTORY_MESSAGES: int = int(os.getenv("MAX_HISTORY_MESSAGES", 10))
+    MAX_HISTORY_MESSAGES: int = int(os.getenv("MAX_HISTORY_MESSAGES", 6))
     HISTORY_TTL_DAYS: int = 7
     MAX_HISTORY_TOKENS:int = int(os.getenv("MAX_HISTORY_TOKENS", 1024))  # Бюджет токенов на историю
     MIN_DOC_TOKEN:int  = int(os.getenv("MIN_DOC_TOKEN", 50))  # Минимальный токен для документа
@@ -83,10 +84,11 @@ class RAGConfig(BaseSettings):
     # Reranker
     RERANKER_BASE_URL: str = "http://172.20.4.50:8002"
 
-    # Context control
-    MAX_CONTEXT_TOKENS: int = int(os.getenv("MAX_CONTEXT_TOKENS", 12800))
-    RESERVED_FOR_COMPLETION: int = int(os.getenv("RESERVED_FOR_COMPLETION", 2048))
-    RESERVED_FOR_OVERHEAD: int = int(os.getenv("RESERVED_FOR_OVERHEAD", 1024))
+    # Context control (Сумма жестко бьется в 8192)
+    MAX_CONTEXT_TOKENS: int = int(os.getenv("MAX_CONTEXT_TOKENS", 5120)) # Максимум под документы
+    RESERVED_FOR_COMPLETION: int = int(os.getenv("RESERVED_FOR_COMPLETION", 2048)) # Запас на ответ LLM
+    RESERVED_FOR_OVERHEAD: int = int(os.getenv("RESERVED_FOR_OVERHEAD", 1024))  # Системный промпт + история
+
 
     # Redis
     REDIS_HOST: str = "172.20.4.50"
@@ -360,6 +362,13 @@ class RAGConfig(BaseSettings):
         "Conversation history:\n{chat_history}\n\n"
         "Question: {question}\n\n"
         "Answer in Russian:\n"
+    )
+
+    QA_PROMPT_TOOL_CHECK_SYSTEM: str = (
+        "Ты — роутер. Определи, нужен ли внешний инструмент для ответа. "
+        "Если вопрос про актуальные данные (погода, курсы, статусы, "
+        "внутренние документы) — вызови подходящий инструмент. "
+        "Во всех остальных случаях — ничего не вызывай."
     )
 
     class Config:

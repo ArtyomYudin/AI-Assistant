@@ -3,10 +3,12 @@
 import asyncio
 import logging
 import time
+import json
+
 from typing import List, Optional
 
 from langchain_core.documents import Document
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage, ToolMessage
 
 from config.rag_config import RAGConfig
 from core.chat_history import RedisChatHistory
@@ -18,6 +20,8 @@ from core.utils import count_tokens, truncate_text_by_tokens
 from core.embedding_cache import RedisEmbeddingCache
 from core.collection_manager import CollectionManager
 from core.rate_limiter import LLMRateLimiter, RateLimitExceeded
+
+from core.tools.registry import ALL_TOOLS, TOOL_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +63,8 @@ class RAGCore:
         # Лениво инициализируемые объекты
         self._embeddings = None
         self._llm = None
+        self._llm_with_tools = None
+        self._tool_check_llm = None
 
         # Ретривер
         self.retriever = None
@@ -164,6 +170,64 @@ class RAGCore:
                 },
             )
         return self._llm
+
+
+    @property
+    def llm_with_tools(self):
+        """LLM с привязанными инструментами (ленивая инициализация)."""
+        if self._llm_with_tools is None:
+            self._llm_with_tools = self.llm.bind_tools(ALL_TOOLS)
+            logger.info(
+                "LLM bind_tools: %d инструментов → %s",
+                len(ALL_TOOLS),
+                [t["function"]["name"] for t in ALL_TOOLS],
+            )
+        return self._llm_with_tools
+
+
+    @property
+    def tool_check_llm(self):
+        """Лёгкий LLM только для решения «нужен ли инструмент»."""
+        if self._tool_check_llm is None:
+            # ★ bind к llm_with_tools (не к llm) — переиспользует уже
+            # сделанный bind_tools, не строит его заново
+            self._tool_check_llm = self.llm_with_tools.bind(
+                max_tokens=64,
+                temperature=0.0,
+            )
+        return self._tool_check_llm
+
+    async def _exec_tool(self, tool_call: dict) -> dict:
+        name = tool_call["name"]
+        args = tool_call.get("args") or {}
+        tool_id = tool_call.get("id", "?")
+
+        func = TOOL_REGISTRY.get(name)
+        if func is None:
+            logger.warning("Неизвестный инструмент: %s (id=%s)", name, tool_id)
+            return {"error": f"Инструмент '{name}' не найден"}
+
+        try:
+            logger.info("🔧 tool_call: %s(%s) id=%s", name, args, tool_id)
+
+            # ★ Универсальный потолок — ни один инструмент не занимает >5 сек
+            # ★ Поддержка StructuredTool (если кто-то обернёт в @tool)
+            coro = func.ainvoke(args) if hasattr(func, "ainvoke") else func(**args)
+            result = await asyncio.wait_for(coro, timeout=5.0)
+
+            if not isinstance(result, dict):
+                result = {"result": result}
+            return result
+
+        except asyncio.TimeoutError:
+            logger.warning("⏱️ tool %s превысил 5 сек — прерываю", name)
+            return {"error": f"Инструмент {name} не ответил вовремя"}
+        except TypeError as e:
+            logger.exception("Неверные аргументы для %s(%s): %s", name, args, e)
+            return {"error": f"Неверные аргументы для {name}: {e}"}
+        except Exception as e:
+            logger.exception("Ошибка выполнения %s: %s", name, e)
+            return {"error": f"Ошибка выполнения {name}: {e}"}
 
 
     async def _index_documents(
@@ -440,6 +504,46 @@ class RAGCore:
         messages.append(HumanMessage(content=user_content))
         return messages
 
+
+    async def warmup(self) -> None:
+        """
+        Единая точка прогрева всех «ленивых» ресурсов.
+        Вызывать из lifespan (api) и из старта gradio — один раз.
+        Прогрев токенизатора — синхронный, embeddings — async.
+        """
+        import time as _t
+        t0 = _t.monotonic()
+
+        # Токенизатор (native HF или tiktoken fallback)
+        try:
+            from core.utils import get_tokenizer, count_tokens
+            get_tokenizer()
+            count_tokens("warmup")
+            logger.info("✅ Токенизатор прогрет")
+        except Exception as e:
+            logger.warning("⚠️ Токенизатор warmup failed: %s", e)
+
+        # Embeddings (FRIDA на GPU1 — первый вызов ~500мс)
+        try:
+            await self.embeddings.embed_query("warmup")
+            logger.info("✅ Embeddings прогреты")
+        except Exception as e:
+            logger.warning("⚠️ Embeddings warmup failed: %s", e)
+
+        # LLM: создаёт ChatOpenAI + httpx-клиент + bind_tools
+        try:
+            _ = self.llm
+            _ = self.llm_with_tools
+            _ = self.tool_check_llm
+            # Реальный ping: устанавливает TCP и греет планировщик vLLM
+            await self.llm.bind(max_tokens=1).ainvoke([HumanMessage(content=".")])
+            logger.info("✅ LLM прогреты: %d инструментов", len(ALL_TOOLS))
+        except Exception as e:
+            logger.warning("⚠️ LLM warmup failed: %s", e)
+
+        logger.info("🎯 Warmup завершён за %.2fс", _t.monotonic() - t0)
+
+
     # ─────────────────────────────────────────────────────────────
     # QA-генератор
     # ─────────────────────────────────────────────────────────────
@@ -458,35 +562,142 @@ class RAGCore:
 
         async def generate_answer_stream(question: str, user_id: str = "default"):
             start_time = time.time()
-            logger.debug(f"[{user_id}] 🚀 Начал обработку вопроса: {question[:100]}...")
+            logger.debug(f"[{user_id}] 🚀 Начал обработку: {question[:100]}...")
 
+            # 1. Пустой вопрос
             if not question.strip():
-                logger.warning(f"[{user_id}] Получен пустой вопрос")
                 yield {"type": "response", "text": "Пожалуйста, задайте вопрос."}
                 return
 
-            # Вежливые/служебные фразы — без LLM
+            # 2. Вежливые фразы — без LLM
             if PoliteDetector.is_polite(question):
                 yield {"type": "response", "text": PoliteDetector.reply(question)}
                 return
 
-            yield {"type": "status", "text": "📚⏳ Думаю над вашим вопросом...\n"}
-            yield {"type": "status", "text": "📚 Ищу документы...\n"}
+            # yield {"type": "status", "text": "🤔 Определяю, что нужно сделать...\n"}
+            yield {"type": "status", "text": "🔍 Ищу информацию...\n"}
 
-            # Параллельно: поиск + загрузка истории
-            search_start = time.time()
-            search_task = asyncio.create_task(self.retriever(question, user_id))
+            # ═══════════════════════════════════════════════════════════════
+            # ПАРАЛЛЕЛЬНЫЙ СТАРТ: retrieval + история
+            # retrieval понадобится только если инструмент не нужен.
+            # Запускаем заранее — latency скроется за tool-check.
+            # ═══════════════════════════════════════════════════════════════
+            retrieval_task = asyncio.create_task(self.retriever(question, user_id))
             history_task = asyncio.create_task(
                 asyncio.to_thread(self.get_history(user_id).get_messages)
             )
-            logger.debug(f"[{user_id}] Запустил параллельные задачи: retrieval + history")
 
             try:
-                docs = await search_task
-                search_time = time.time() - search_start
-                logger.debug(
-                    f"[{user_id}] ✅ Найдено {len(docs)} документов за {search_time:.2f} сек"
+                hist = await history_task
+                logger.debug(f"[{user_id}] ✅ История: {len(hist)} сообщений")
+            except Exception as e:
+                logger.exception(f"[{user_id}] ❌ Ошибка истории: {e}")
+                hist = []
+
+            # ═══════════════════════════════════════════════════════════════
+            # TOOL-CHECK: модель решает, нужен ли инструмент
+            # ═══════════════════════════════════════════════════════════════
+            # tool_messages: List[BaseMessage] = [
+            #     SystemMessage(content=self.config.QA_PROMPT_HYBRID_RU_SYSTEM),
+            #     *hist,
+            #     HumanMessage(content=question),
+            # ]
+            recent_hist = hist[-4:] if len(hist) > 4 else hist
+            tool_messages: List[BaseMessage] = [
+                SystemMessage(content=self.config.QA_PROMPT_TOOL_CHECK_SYSTEM),
+                *recent_hist,
+                HumanMessage(content=question),
+            ]
+
+            first_response = None
+            try:
+                # first_response = await self.llm_with_tools.ainvoke(tool_messages)
+                first_response = await self.tool_check_llm.ainvoke(tool_messages)
+            except Exception as e:
+                # Не падаем — проваливаемся в обычный RAG
+                logger.exception(f"[{user_id}] ❌ Ошибка tool-check: {e}")
+
+            # ═══════════════════════════════════════════════════════════════
+            # ВЕТКА A: МОДЕЛЬ ЗАПРОСИЛА ИНСТРУМЕНТ(Ы)
+            # ═══════════════════════════════════════════════════════════════
+            if first_response and getattr(first_response, "tool_calls", None):
+                # retrieval больше не нужен — отменяем чисто
+                if not retrieval_task.done():
+                    retrieval_task.cancel()
+                    try:
+                        await retrieval_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+                yield {"type": "status", "text": "🛠️ Выполняю внешний запрос...\n"}
+
+                tool_messages.append(first_response)
+
+                # Параллельно выполняем все запрошенные инструменты
+                results = await asyncio.gather(
+                    *(self._exec_tool(tc) for tc in first_response.tool_calls)
                 )
+
+                for tc, result in zip(first_response.tool_calls, results):
+                    tool_messages.append(
+                        ToolMessage(
+                            content=json.dumps(result, ensure_ascii=False),
+                            tool_call_id=tc["id"],
+                        )
+                    )
+
+                yield {"type": "status", "text": "🧠 Формирую ответ...\n"}
+
+                # Заменяем system-промпт роутера на боевой QA-промпт
+                # — иначе модель отвечает без правил стиля («не предлагай услуг», «кратко»)
+                tool_messages[0] = SystemMessage(content=self.config.QA_PROMPT_HYBRID_RU_SYSTEM)
+
+                full = ""
+                buffer = ""
+
+                if not self.llm_limiter.is_available():
+                    yield {"type": "status", "text": "⏳ Ожидаю свободный слот LLM...\n"}
+
+                try:
+                    async with self.llm_limiter.acquire(user_id=user_id):
+                        async for chunk in self.llm.astream(tool_messages):
+                            if content := chunk.content:
+                                full += content
+                                buffer += content
+                                if len(buffer) > 50 or content in ".!?\n":
+                                    yield {"type": "response", "text": buffer}
+                                    buffer = ""
+                    if buffer:
+                        yield {"type": "response", "text": buffer}
+                except RateLimitExceeded as e:
+                    logger.warning(f"[{user_id}] Rate limit (tool-flow): {e}")
+                    yield {"type": "error", "text": str(e)}
+                    return
+                except Exception as e:
+                    logger.exception(f"[{user_id}] ❌ Генерация (tool-flow): {e}")
+                    yield {"type": "error", "text": "Произошла ошибка при генерации ответа."}
+                    return
+
+                # История: только вопрос + финальный ответ (без ToolMessage и AIMessage-with-tool_calls)
+                if full.strip():
+                    try:
+                        h = self.get_history(user_id)
+                        h.add_message(HumanMessage(content=question))
+                        h.add_message(AIMessage(content=full))
+                    except Exception as e:
+                        logger.exception(f"[{user_id}] ❌ Ошибка сохранения: {e}")
+
+                logger.debug(f"[{user_id}] 🎯 Tool-flow: {time.time() - start_time:.2f}с")
+                return
+
+            # ═══════════════════════════════════════════════════════════════
+            # ВЕТКА B: ОБЫЧНЫЙ RAG-ПОТОК (retrieval уже запущен)
+            # ═══════════════════════════════════════════════════════════════
+            yield {"type": "status", "text": "📚 Ищу документы...\n"}
+
+            try:
+                docs = await retrieval_task
+                logger.debug(f"[{user_id}] ✅ Найдено {len(docs)} документов")
             except Exception as e:
                 logger.exception(f"[{user_id}] ❌ Ошибка поиска: {e}")
                 yield {"type": "error", "text": "Ошибка при поиске документов."}
@@ -494,33 +705,15 @@ class RAGCore:
 
             if not docs:
                 if self.config.MODE == "rag":
-                    logger.debug(f"[{user_id}] ❗ RAG-режим, документов нет")
                     yield {"type": "info", "text": "Информация не найдена."}
                     return
-                else:
-                    logger.info(
-                        f"[{user_id}] Нет релевантных документов — "
-                        f"режим {self.config.MODE}, отвечаю из знаний"
-                    )
-                    docs = []
+                logger.info(f"[{user_id}] Нет документов — режим {self.config.MODE}")
+                docs = []
 
             yield {"type": "status", "text": "✅ Документы найдены. Формирую ответ...\n"}
 
-            # Ждём историю
-            try:
-                hist = await history_task
-                logger.debug(
-                    f"[{user_id}] ✅ История загружена, сообщений: {len(hist)}"
-                )
-            except Exception as e:
-                logger.exception(f"[{user_id}] ❌ Ошибка загрузки истории: {e}")
-                hist = []
-
-            # Формируем контекст
-            context_start = time.time()
             try:
                 context, truncated_history, history_summary = self._build_context(docs, hist)
-
                 logger.info(
                     f"[{user_id}] retrieval: docs={len(docs)}, "
                     f"context_chars={len(context)}, "
@@ -528,49 +721,23 @@ class RAGCore:
                     f"has_summary={bool(history_summary)}, "
                     f"sources={[d.metadata.get('source') for d in docs]}"
                 )
-                for d in docs:
-                    logger.info(
-                        f"  chunk: {d.metadata.get('title')} | {d.page_content[:80]!r}"
-                    )
-
-                context_time = time.time() - context_start
-                token_count = count_tokens(context) if context else 0
-                logger.debug(
-                    f"[{user_id}] ✅ Контекст собран за {context_time:.2f} сек, "
-                    f"токенов: {token_count}, символов: {len(context)}"
-                )
             except Exception as e:
-                logger.exception(f"[{user_id}] ❌ Ошибка формирования контекста: {e}")
+                logger.exception(f"[{user_id}] ❌ Ошибка контекста: {e}")
                 yield {"type": "error", "text": "Ошибка при подготовке контекста."}
                 return
 
-            if not context:
-                if self.config.MODE == "rag":
-                    logger.warning(f"[{user_id}] Контекст пуст — RAG-режим")
-                    yield {"type": "error", "text": "Информация не найдена."}
-                    return
-                else:
-                    logger.info(
-                        f"[{user_id}] Контекст пуст — режим {self.config.MODE}, "
-                        f"отвечаю из знаний"
-                    )
+            if not context and self.config.MODE == "rag":
+                yield {"type": "error", "text": "Информация не найдена."}
+                return
 
-            # Лог полного контекста
             logger.info(f"[{user_id}] ПОЛНЫЙ КОНТЕКСТ В LLM:\n{context}")
 
-            # Строим сообщения
             messages = self._build_messages(
                 mode=self.config.MODE,
                 question=question,
                 context=context,
                 truncated_history=truncated_history,
                 history_summary=history_summary,
-            )
-            logger.info(
-                f"[{user_id}] в LLM: {len(messages)} messages, "
-                f"context_tokens≈{count_tokens(context)}, "
-                f"history_msgs={len(truncated_history)}, "
-                f"has_summary={bool(history_summary)}"
             )
 
             full = ""
@@ -582,55 +749,47 @@ class RAGCore:
                 yield {"type": "status", "text": "⏳ Ожидаю свободный слот LLM...\n"}
 
             try:
-                logger.debug(f"[{user_id}] 🧠 Начинаю генерацию LLM...")
-
                 async with self.llm_limiter.acquire(user_id=user_id):
                     async for chunk in self.llm.astream(messages):
                         if content := chunk.content:
                             if not first_token_received:
-                                first_token_time = time.time() - llm_start
                                 logger.debug(
-                                    f"[{user_id}] ⚡ Первый токен за {first_token_time:.2f} сек"
+                                    f"[{user_id}] ⚡ Первый токен за "
+                                    f"{time.time() - llm_start:.2f}с"
                                 )
                                 first_token_received = True
                                 yield {"type": "status", "text": "🧠 Генерирую ответ...\n"}
-
                             full += content
                             buffer += content
                             if len(buffer) > 50 or content in ".!?\n":
                                 yield {"type": "response", "text": buffer}
                                 buffer = ""
-
-                # ★ Сброс остатка — иначе теряются последние <50 символов
                 if buffer:
                     yield {"type": "response", "text": buffer}
-
             except RateLimitExceeded as e:
                 logger.warning(f"[{user_id}] Rate limit: {e}")
                 yield {"type": "error", "text": str(e)}
                 return
-
             except Exception as e:
-                logger.exception(f"[{user_id}] ❌ Ошибка при генерации ответа: {e}")
+                logger.exception(f"[{user_id}] ❌ Ошибка генерации: {e}")
                 yield {"type": "error", "text": "Произошла ошибка при генерации ответа."}
                 return
 
-            # ★ Сохранение в историю — иначе диалог не помнит контекст
             if full.strip():
-                save_start = time.time()
+                generated_tokens = count_tokens(full)
+                gen_time = time.time() - llm_start
+                logger.info(
+                    f"[{user_id}] 📊 генерация: {generated_tokens} токенов за {gen_time:.2f}с "
+                    f"(~{generated_tokens / gen_time:.0f} tok/s), chars={len(full)}"
+                )
                 try:
-                    history = self.get_history(user_id)
-                    history.add_message(HumanMessage(content=question))
-                    history.add_message(AIMessage(content=full))
-                    save_time = time.time() - save_start
-                    logger.debug(
-                        f"[{user_id}] 💾 Ответ сохранён в историю за {save_time:.2f} сек"
-                    )
+                    h = self.get_history(user_id)
+                    h.add_message(HumanMessage(content=question))
+                    h.add_message(AIMessage(content=full))
                 except Exception as e:
-                    logger.exception(f"[{user_id}] ❌ Ошибка сохранения истории: {e}")
+                    logger.exception(f"[{user_id}] ❌ Ошибка сохранения: {e}")
 
-            total_time = time.time() - start_time
-            logger.debug(f"[{user_id}] 🎯 Полное время обработки: {total_time:.2f} сек")
+            logger.debug(f"[{user_id}] 🎯 RAG-flow: {time.time() - start_time:.2f}с")
 
 
         self.qa_chain_with_history = generate_answer_stream

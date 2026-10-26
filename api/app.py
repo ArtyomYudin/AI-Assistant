@@ -2,30 +2,12 @@
 
 import json
 import os
+
+import config.logging_config # noqa: F401 — настраивает логи ДО core.*
+
 import logging
 
 from core.utils import get_current_user
-
-# ─── Логирование ─────────────────────────────────────────────────
-logging.basicConfig(
-    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
-    format="%(asctime)s | %(levelname)-8s | %(name)s: %(message)s",
-    handlers=[logging.StreamHandler()],
-)
-
-# ★ Подавляем шумные библиотеки — иначе при DEBUG 20+ строк на запрос
-for _noisy in (
-    # HTTP-клиенты (vLLM, embeddings, reranker)
-    "httpx", "httpcore", "httpx2", "httpcore2",
-    "openai._base_client",
-    # Redis
-    "redis", "redis.connection",
-    # gRPC / Milvus
-    "grpc", "grpc._cython.cygrpc",
-    # asyncio-служебное
-    "asyncio", "urllib3",
-):
-    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 
 from contextlib import asynccontextmanager
@@ -56,21 +38,8 @@ async def lifespan(app: FastAPI):
         core.create_retriever(k=cfg.K, fetch_k=cfg.FETCH_K)
         core.create_qa_generator()
 
-        # Warmup токенизатора — грузим до первого запроса
-        try:
-            from core.utils import get_tokenizer, count_tokens
-            get_tokenizer()
-            count_tokens("warmup")
-            logger.info("✅ Токенизатор прогрет")
-        except Exception as e:
-            logger.warning("Токенизатор не загрузился: %s", e)
-
-        # Warmup embeddings (первый запрос к frida тоже медленный)
-        try:
-            await core.embeddings.embed_query("warmup")
-            logger.info("✅ Embeddings прогреты")
-        except Exception as e:
-            logger.warning("Embeddings warmup failed: %s", e)
+        # единый прогрев: токенизатор + embeddings + LLM
+        await core.warmup()
 
         logger.info("✅ RAGCore успешно инициализирован")
     except Exception as e:
@@ -98,6 +67,8 @@ app.add_middleware(
 # ─── Публичный /health — для мониторинга ─────────────────────────
 @app.get("/health")
 async def health():
+    if core is None:
+        return {"status": "degraded", "checks": {"core": "not initialized"}}
     checks = {}
 
     try:

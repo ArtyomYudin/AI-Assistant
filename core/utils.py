@@ -1,9 +1,9 @@
 # core/utils.py
 
-import hashlib
-import logging
 import os
 import re
+import hashlib
+import logging
 from typing import Optional
 import tiktoken
 from fastapi import HTTPException, Header
@@ -22,7 +22,7 @@ _native_tokenizer_failed = False
 _fallback_tokenizer = None
 
 _last_attempt = 0.0
-RETRY_INTERVAL = 60.0
+RETRY_INTERVAL = 86400.0
 
 
 @lru_cache(maxsize=1)

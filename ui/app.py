@@ -1,15 +1,21 @@
 # gradio/app.py
+import asyncio
 import os
+import config.logging_config # noqa: F401 — настраивает логи ДО core.*
 import json
 import uuid
+import logging
 
 import gradio as gr
 
 from config.rag_config import RAGConfig
 from core.rag_core import RAGCore
 
+logger = logging.getLogger(__name__)
+
 cfg = RAGConfig()
 core: RAGCore | None = None
+_warmed_up = False
 
 DEBUG = cfg.GRADIO_DEBUG
 GRADIO_USER = cfg.GRADIO_USER
@@ -24,7 +30,18 @@ async def init_rag():
         await core.collection_manager.build_router()
         core.create_retriever(k=cfg.K, fetch_k=cfg.FETCH_K)
         core.create_qa_generator()
+        logger.info("RAGCore создан (loop=%s)", id(asyncio.get_running_loop()))
     return core
+
+
+async def init_rag_and_warmup():
+    """Прогрев в том же event loop, что использует Gradio."""
+    global _warmed_up
+    rag = await init_rag()
+    if not _warmed_up:
+        await rag.warmup()
+        _warmed_up = True
+    # return rag
 
 
 def new_session_id() -> str:
@@ -39,7 +56,7 @@ async def chat_answer_stream(message: str, history: list, session_id: str):
 
     full = ""
     buffer = ""
-    async for chunk in rag.qa_chain_with_history(message, session_id=session_id):
+    async for chunk in rag.qa_chain_with_history(message, user_id=session_id):
         text = chunk.get("text") if isinstance(chunk, dict) else str(chunk)
         buffer += text
         if len(buffer) >= 10:
@@ -88,12 +105,15 @@ with gr.Blocks(title="RAG — Internal UI") as demo:
     gr.Markdown("## 🔎 RAG QA — внутренний инструмент")
     gr.Markdown(
         "⚠️ Только для разработчиков и тестирования. "
-        "Продовый RAG — через `/ask/sse` с JWT."
+        "Продовый RAG — через `/ask/stream` с JWT."
     )
 
     sid_state = gr.State()
     # Инициализируем уникальный session_id на каждую сессию браузера
     demo.load(fn=new_session_id, inputs=None, outputs=sid_state)
+
+    # Прогрев в Gradio-loop (а не в отдельном через new_event_loop)
+    demo.load(fn=init_rag_and_warmup, inputs=None, outputs=None)
 
     with gr.Tab("Диалог"):
         gr.ChatInterface(
@@ -120,13 +140,13 @@ with gr.Blocks(title="RAG — Internal UI") as demo:
 
 if __name__ == "__main__":
     launch_kwargs = {
-        "server_name": "127.0.0.1",   # ← только localhost
+        "server_name": "127.0.0.1",
         "server_port": 7860,
     }
     if GRADIO_USER and GRADIO_PASSWORD:
         launch_kwargs["auth"] = [(GRADIO_USER, GRADIO_PASSWORD)]
-        print(f"🔐 Basic-auth включён для {GRADIO_USER}")
+        logger.info("Basic-auth включён для %s", GRADIO_USER)
     else:
-        print("⚠️ GRADIO_USER/GRADIO_PASSWORD не заданы — запуск без auth (только localhost)")
+        logger.warning("GRADIO_USER/GRADIO_PASSWORD не заданы — запуск без auth")
 
     demo.queue().launch(**launch_kwargs)

@@ -16,7 +16,7 @@ async def stream_answer_and_evaluate(
 ) -> AsyncGenerator[str, None]:
     start = time.time()
     buffer = ""
-    async for chunk in core.qa_chain_with_history(question, session_id=session_id):
+    async for chunk in core.qa_chain_with_history(question, user_id=session_id):
         if isinstance(chunk, dict):
             # Служебные/ошибочные — не идут в coverage
             if chunk.get("type") in ("error", "status", "info"):

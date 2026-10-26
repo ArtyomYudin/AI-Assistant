@@ -10,11 +10,6 @@ from pymilvus.client.types import LoadState
 from config.rag_config import RAGConfig
 from core.utils import hash_text, remove_stopwords_russian
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s: %(message)s")
-# Приглушаем шумные библиотеки
-for noisy in ("httpx", "httpcore", "urllib3", "asyncio"):
-    logging.getLogger(noisy).setLevel(logging.WARNING)
-
 logger = logging.getLogger(__name__)
 
 class MilvusManager:
