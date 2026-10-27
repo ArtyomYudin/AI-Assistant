@@ -1,6 +1,5 @@
 # gradio/app.py
 import asyncio
-import os
 import config.logging_config # noqa: F401 — настраивает логи ДО core.*
 import json
 import uuid

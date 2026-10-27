@@ -97,6 +97,7 @@ class MilvusManager:
         schema.add_field(field_name="hash", datatype=DataType.VARCHAR, max_length=64)
         schema.add_field(field_name="dense_vector", datatype=DataType.FLOAT_VECTOR, dim=dense_dim)
         schema.add_field(field_name="sparse_vector", datatype=DataType.SPARSE_FLOAT_VECTOR)
+        schema.add_field(field_name="chunk_index", datatype=DataType.INT64, default_value=0)
 
         # Добавляем BM25 для sparse-вектора (по text_full)
         schema.add_function(Function(
@@ -305,7 +306,7 @@ class MilvusManager:
                 collection_name = collection_name, #self.collection_name,
                 reqs = [req_dense, req_sparse],
                 ranker = ranker,
-                output_fields = ["text","title", "bm25_text", "source","hash"],
+                output_fields = ["text","title", "bm25_text", "source","hash", "chunk_index"],
                 limit = top_k
             )
             # ДИАГНОСТИКА — временно
@@ -331,6 +332,7 @@ class MilvusManager:
                                     "bm25_text": ent.get("bm25_text"),
                                     "source": ent.get("source","N/A"),
                                     "hash": ent.get("hash",""),
+                                    "chunk_index": ent.get("chunk_index", 999),
                                     "score": self._extract_score(res)
                                 }
                             )

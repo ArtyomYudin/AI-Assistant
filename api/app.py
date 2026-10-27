@@ -1,14 +1,11 @@
 # api/app.py
 
 import json
-import os
-
 import config.logging_config # noqa: F401 — настраивает логи ДО core.*
 
 import logging
 
 from core.utils import get_current_user
-
 
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator

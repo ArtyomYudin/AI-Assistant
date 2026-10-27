@@ -1,16 +1,14 @@
 # core/chat_history.py
-
 import json
 import logging
 from typing import List
 from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 import redis
 from datetime import timedelta
 
 from pydantic import BaseModel
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 class MergeRequest(BaseModel):
@@ -50,64 +48,87 @@ class RedisChatHistory(BaseChatMessageHistory):
         self.max_messages = max_messages  # ограничение
 
     def add_message(self, message):
-        """Добавляет сообщение в историю."""
+        """Добавляет сообщение. Сохраняет tool_calls и tool_call_id."""
         msg_data = {
             "type": message.type,
             "content": message.content,
             "timestamp": getattr(message, "additional_kwargs", {}).get("timestamp"),
         }
 
-        # Сохраняем в Redis
+        # ★ Сохраняем tool_calls для AIMessage (иначе API вернёт 400)
+        tool_calls = getattr(message, "tool_calls", None)
+        if tool_calls:
+            msg_data["tool_calls"] = tool_calls
+
+        # ★ Сохраняем tool_call_id для ToolMessage (иначе API вернёт 400)
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if tool_call_id:
+            msg_data["tool_call_id"] = tool_call_id
+
         try:
             pipe = self.redis_client.pipeline()
-            # Добавляем в начало списка
             pipe.lpush(self.key, json.dumps(msg_data))
-            # Ограничиваем длину списка
             pipe.ltrim(self.key, 0, self.max_messages - 1)
-            # Устанавливаем TTL, если ключа ещё нет
-            # if self.redis_client.ttl(self.key) == -1:  # ключ не имеет TTL
             pipe.expire(self.key, int(self.ttl.total_seconds()))
             pipe.execute()
         except Exception as e:
             logger.warning("Ошибка при сохранении сообщения в Redis: %s", e)
 
     def get_messages(self) -> List:
-        """Возвращает список сообщений (в обратном порядке)."""
+        """Восстанавливает сообщения с tool_calls и tool_call_id."""
         try:
             raw = self.redis_client.lrange(self.key, 0, -1)
             messages = []
-            for item in reversed(raw):  # последние — первые
+            for item in reversed(raw):
                 try:
                     data = json.loads(item)
-                    cls = HumanMessage if data["type"] == "human" else AIMessage
-                    messages.append(cls(content=data["content"]))
+                    msg_type = data.get("type")
+                    content = data.get("content", "")
+
+                    if msg_type == "human":
+                        messages.append(HumanMessage(content=content))
+                    elif msg_type == "system":
+                        messages.append(SystemMessage(content=content))
+                    elif msg_type == "ai":
+                        # ★ Восстанавливаем tool_calls, если были
+                        tool_calls = data.get("tool_calls") or []
+                        if tool_calls:
+                            messages.append(AIMessage(content=content, tool_calls=tool_calls))
+                        else:
+                            messages.append(AIMessage(content=content))
+                    elif msg_type == "tool":
+                        # ★ Восстанавливаем ToolMessage с tool_call_id
+                        tool_call_id = data.get("tool_call_id", "")
+                        if not tool_call_id:
+                            logger.warning(
+                                "ToolMessage без tool_call_id — пропускаю: %r",
+                                content[:80],
+                            )
+                            continue
+                        messages.append(ToolMessage(
+                            content=content, tool_call_id=tool_call_id,
+                        ))
+                    else:
+                        logger.warning("Неизвестный тип сообщения: %s", msg_type)
                 except Exception as e:
-                    logger.warning("Ошибка при разборе сообщения: %s",e)
+                    logger.warning("Ошибка при разборе сообщения: %s", e)
             return messages
         except Exception as e:
             logger.warning("Ошибка при чтении истории из Redis: %s", e)
             return []
 
     def clear(self):
-        """Очищает историю."""
         self.redis_client.delete(self.key)
 
     @classmethod
     def merge(cls, src_session: str, dst_session: str, **kwargs) -> int:
-        """
-        Перенос истории из одной сессии в другую.
-        Возвращает количество перенесённых сообщений.
-        """
         src = cls(src_session, **kwargs)
         dst = cls(dst_session, **kwargs)
-
         messages = src.get_messages()
         if not messages:
             return 0
-
         for msg in messages:
             dst.add_message(msg)
-
         src.clear()
         return len(messages)
 

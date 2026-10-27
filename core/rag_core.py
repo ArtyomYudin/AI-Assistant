@@ -133,6 +133,7 @@ class RAGCore:
                 temperature=self.config.LLM_TEMPERATURE,
                 top_p=self.config.LLM_TOP_P,
                 presence_penalty=self.config.LLM_PRESENCE_PENALTY,
+                frequency_penalty=self.config.LLM_FREQUENCY_PENALTY,
                 streaming=True,
                 extra_body={
                     "chat_template_kwargs": {"enable_thinking": False},
@@ -230,6 +231,82 @@ class RAGCore:
             return {"error": f"Ошибка выполнения {name}: {e}"}
 
 
+    def _count_msg_tokens(self, m: BaseMessage) -> int:
+        """Токены сообщения с учётом tool_calls (для AIMessage)."""
+        base = count_tokens(m.content or "")
+        tool_calls = getattr(m, "tool_calls", None)
+        if tool_calls:
+            base += count_tokens(json.dumps(tool_calls, ensure_ascii=False))
+        return base
+
+
+    def _log_prompt_stats(self, user_id: str, messages: List[BaseMessage], branch: str):
+        """Раскладка промпта по ролям: system / history / tool / question."""
+        if not messages:
+            return
+
+        system_tok = 0
+        history_tok = 0
+        tool_tok = 0
+        question_tok = 0
+
+        # Находим последний HumanMessage — это текущий вопрос
+        last_human_idx = -1
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].type == "human":
+                last_human_idx = i
+                break
+
+        for i, m in enumerate(messages):
+            n = self._count_msg_tokens(m)
+            if m.type == "system":
+                system_tok += n
+            elif m.type == "tool":
+                tool_tok += n
+            elif i == last_human_idx:
+                question_tok += n
+            elif m.type == "ai" and getattr(m, "tool_calls", None):
+                tool_tok += n
+            else:
+                history_tok += n
+
+        total = system_tok + history_tok + tool_tok + question_tok
+
+        logger.info(
+            f"[{user_id}] 📥 ПРОМПТ ({branch}): total={total} tok | "
+            f"system={system_tok}, history={history_tok}, "
+            f"tool={tool_tok}, question={question_tok} | msgs={len(messages)}"
+        )
+
+
+    def _log_full_messages(self, user_id: str, messages: List[BaseMessage], branch: str):
+        """Полный дамп всех сообщений — для отладки."""
+        if not logger.isEnabledFor(logging.DEBUG):
+            return  # ★ дампим только в DEBUG
+        if not messages:
+            return
+        lines = [f"[{user_id}] 📜 ПОЛНЫЙ ПРОМПТ ({branch}) — {len(messages)} сообщений:"]
+        for i, m in enumerate(messages):
+            role = m.type.upper()
+            content = (m.content or "").strip()
+            tool_calls = getattr(m, "tool_calls", None)
+            tool_call_id = getattr(m, "tool_call_id", None)
+
+            if tool_calls:
+                tc_str = ", ".join(
+                    f"{tc['name']}({tc.get('args', {})})" for tc in tool_calls
+                )
+                lines.append(f"  [{i}] {role} (tool_calls: {tc_str}): {content[:150]!r}")
+            elif tool_call_id:
+                preview = content[:300] if len(content) > 300 else content
+                lines.append(f"  [{i}] {role} (id={tool_call_id[:20]}...): {preview}")
+            else:
+                preview = content[:500] if len(content) > 500 else content
+                suffix = "..." if len(content) > 500 else ""
+                lines.append(f"  [{i}] {role}: {preview}{suffix}")
+        logger.info("\n".join(lines))
+
+
     async def _index_documents(
             self,
             collection_name: str,
@@ -288,10 +365,11 @@ class RAGCore:
                 "source": s,
                 "hash": h,
                 "dense_vector": dv,
+                "chunk_index": idx,  # позиция в документе
             }
-            for t, tit, bm25, s, h, dv in zip(
+            for idx, (t, tit, bm25, s, h, dv) in enumerate(zip(
                 texts, titles, bm25_texts, sources, hashes, dense_vectors
-            )
+            ))
         ]
 
         unique = await milvus.ensure_not_duplicate_rows(rows)
@@ -388,39 +466,93 @@ class RAGCore:
         self.retriever = routed_retrieve
         logger.info("Ретривер с маршрутизацией создан (k=%d, fetch_k=%d)", k, fetch_k)
 
+    def _truncate_history_safe(
+            self,
+            history: List[BaseMessage],
+            max_tokens: int,
+    ) -> List[BaseMessage]:
+        """
+        Обрезает историю по токенам, НИКОГДА не разрывая tool-flow.
+        Точки обрезки — только перед HumanMessage.
+
+        Уровни (по убыванию):
+          1. Максимальная обрезка: с самой ранней safe-point.
+          2. Меньшая обрезка: с более поздних safe-point.
+          3. Fallback: последний ход пользователя (Human + AI), даже если
+             слегка превышает бюджет — лучше чуть больше, чем потерять контекст.
+          4. Последний резерв: только последний HumanMessage.
+        """
+        if not history:
+            return []
+
+        safe_points = [i for i, m in enumerate(history) if m.type == "human"]
+        if not safe_points:
+            return history
+
+        def _total(msgs):
+            return sum(
+                count_tokens(f"{m.type.capitalize()}: {m.content}")
+                for m in msgs
+            )
+
+        # ── УРОВНИ 1–2: пробуем обрезать по safe-points (от ранней к поздней) ──
+        # ★ БЕЗ [len(history)] в конце — иначе цикл всегда вернёт []
+        for idx in safe_points:
+            candidate = history[idx:]
+            if _total(candidate) <= max_tokens:
+                return candidate
+
+        # ── УРОВЕНЬ 3: FALLBACK — последний ход пользователя ──
+        # Ни одна safe-point не влезла. Возвращаем хотя бы последний Human
+        # + следующий за ним AI (один полный ход), даже если слегка
+        # превышает max_tokens — иначе модель потеряет весь контекст.
+        last_human_idx = safe_points[-1]
+        tail = history[last_human_idx:]
+
+        if len(tail) >= 2:
+            one_turn = tail[:2]  # Human + AI (ответ ассистента)
+            if _total(one_turn) <= max_tokens:
+                return one_turn
+            # Даже один ход не влезает — вернём как есть.
+            # Превышение бюджета лучше, чем пустая история для tool-check.
+            logger.warning(
+                "История переполнена: последний ход (%d tok) > бюджет (%d tok). "
+                "Возвращаю как есть.",
+                _total(one_turn), max_tokens,
+            )
+            return one_turn
+
+        # ── УРОВЕНЬ 4: совсем крайний случай — только Human ──
+        return tail[:1]
+
     # ─────────────────────────────────────────────────────────────
     # Контекст и сообщения
     # ─────────────────────────────────────────────────────────────
 
     def _build_context(
-        self,
-        docs: List[Document],
-        history: List[BaseMessage],
+            self,
+            docs: List[Document],
+            history: List[BaseMessage],
     ) -> tuple[str, List[BaseMessage], str]:
         """
-        Формирует контекст для LLM с учётом:
-          - истории чата (обрезанной по токенам + резюме старых)
-          - контекста документов
-          - лимита токенов MAX_CONTEXT_TOKENS
-          - детерминированного порядка документов
+        Формирует контекст для LLM.
 
-        Возвращает (context, truncated_history, history_summary).
+        Отличия от старой версии:
+          - документы группируются по source (документ = источник = логическая единица)
+          - источник включается ЦЕЛИКОМ или пропускается (никогда не режется посередине)
+          - источники упорядочены по top-score своих чанков
+          - fallback: если ни один источник не влез — старое поведение с truncate
+            на top-чанках, чтобы модель не осталась с пустым контекстом
         """
-        # История: обрезаем с конца, сохраняя роли
-        truncated_rev: List[BaseMessage] = []
-        history_tokens = 0
+        # ── 1. История (без изменений) ───────────────────────────────
+        truncated_history = self._truncate_history_safe(
+            history, self.config.MAX_HISTORY_TOKENS
+        )
+        history_tokens = sum(
+            count_tokens(f"{m.type.capitalize()}: {m.content}")
+            for m in truncated_history
+        )
 
-        for m in reversed(history):
-            msg_text = f"{m.type.capitalize()}: {m.content}"
-            tks = count_tokens(msg_text)
-            if history_tokens + tks > self.config.MAX_HISTORY_TOKENS:
-                break
-            truncated_rev.insert(0, m)
-            history_tokens += tks
-
-        truncated_history: List[BaseMessage] = truncated_rev
-
-        # Резюме отброшенных сообщений
         history_summary = ""
         num_skipped = len(history) - len(truncated_history)
         if num_skipped > 0:
@@ -432,37 +564,98 @@ class RAGCore:
             history_summary = f"[Резюме предыдущих сообщений]: {old_text}"
             history_tokens += count_tokens(history_summary)
 
-        # Бюджет на документы
+        # ── 2. Бюджет на документы ───────────────────────────────────
         available = (
-            self.config.MAX_CONTEXT_TOKENS
-            - self.config.RESERVED_FOR_COMPLETION
-            - history_tokens
-            - self.config.RESERVED_FOR_OVERHEAD
+                self.config.MAX_CONTEXT_TOKENS
+                - self.config.RESERVED_FOR_COMPLETION
+                - history_tokens
+                - self.config.RESERVED_FOR_OVERHEAD
         )
         available = max(0, available)
         if available <= 0:
             return "", truncated_history, history_summary
 
-        # Детерминированная сортировка документов
-        docs_sorted = sorted(
-            docs,
-            key=lambda d: (-d.metadata.get("score", 0), d.metadata.get("source", "")),
-        )
+        # ── 3. Группировка по source ─────────────────────────────────
+        by_source: dict[str, list[Document]] = {}
+        for d in docs:
+            src = d.metadata.get("source", "N/A")
+            by_source.setdefault(src, []).append(d)
 
-        # Формирование контекста
-        parts, used = [], 0
-        for d in docs_sorted:
-            text = f"[Источник: {d.metadata.get('source', 'N/A')}] {d.page_content.strip()}\n"
-            tks = count_tokens(text)
-            if used + tks > available:
-                remain = available - used
-                if remain > self.config.MIN_DOC_TOKEN:
-                    parts.append(truncate_text_by_tokens(text, remain))
-                break
-            parts.append(text)
-            used += tks
+        # ── 4. Сортировка источников по их top-score ─────────────────
+        source_groups = sorted(
+            by_source.items(),
+            key=lambda kv: max(d.metadata.get("score", 0.0) for d in kv[1]),
+            reverse=True,
+        )
+        # Внутри источника — чанки тоже по score, для детерминизма
+        for _, chunks in source_groups:
+            # Expanded-чанки (включая top-chunk, у которого теперь есть chunk_index)
+            #   сортируются по позиции в документе. Для обычных (не-expanded) —
+            #   по score, чтобы top-чанки были сверху.
+            any_expanded = any(d.metadata.get("expanded") for d in chunks)
+            if any_expanded:
+                chunks.sort(key=lambda d: d.metadata.get("chunk_index", 999))
+            else:
+                chunks.sort(key=lambda d: -d.metadata.get("score", 0.0))
+
+        # ── 5. Сборка: источник целиком или пропуск ──────────────────
+        parts: list[str] = []
+        used = 0
+        included: list[tuple[str, int, int]] = []  # (source, chunks, tokens)
+        skipped: list[tuple[str, int]] = []  # (source, tokens)
+
+        for src, chunks in source_groups:
+            # Заголовок один раз + все чанки подряд
+            body = "\n".join(d.page_content.strip() for d in chunks)
+            src_text = f"[Источник: {src}]\n{body}\n"
+            src_tokens = count_tokens(src_text)
+
+            if used + src_tokens > available:
+                skipped.append((src, src_tokens))
+                continue
+
+            parts.append(src_text)
+            used += src_tokens
+            included.append((src, len(chunks), src_tokens))
+
+        # ── 6. FALLBACK: ни один источник не влез целиком ────────────
+        #    Старое поведение: top-чанки с truncate.
+        #    Лучше частичный контекст, чем пустой.
+        if not parts and docs:
+            logger.warning(
+                "Context: ни один источник не влез целиком (available=%d tok) — "
+                "фолбэк на top-чанки с truncate",
+                available,
+            )
+            docs_sorted = sorted(docs, key=lambda d: -d.metadata.get("score", 0.0))
+            for d in docs_sorted:
+                text = (
+                    f"[Источник: {d.metadata.get('source', 'N/A')}] "
+                    f"{d.page_content.strip()}\n"
+                )
+                tks = count_tokens(text)
+                if used + tks > available:
+                    remain = available - used
+                    if remain > self.config.MIN_DOC_TOKEN:
+                        parts.append(truncate_text_by_tokens(text, remain))
+                    break
+                parts.append(text)
+                used += tks
 
         context = "".join(parts).strip()
+
+        # ── 7. Диагностика ───────────────────────────────────────────
+        if included or skipped:
+            logger.info(
+                "Context: included=%d [%s] | skipped=%d [%s] | used=%d/%d tok",
+                len(included),
+                ", ".join(f"{s}:{n}ch/{t}t" for s, n, t in included) or "—",
+                len(skipped),
+                ", ".join(f"{s}:{t}t" for s, t in skipped) or "—",
+                used,
+                available,
+            )
+
         return context, truncated_history, history_summary
 
     def _build_messages(
@@ -596,16 +789,24 @@ class RAGCore:
 
             # ═══════════════════════════════════════════════════════════════
             # TOOL-CHECK: модель решает, нужен ли инструмент
+            # Динамический token-aware срез истории диалога
             # ═══════════════════════════════════════════════════════════════
-            # tool_messages: List[BaseMessage] = [
-            #     SystemMessage(content=self.config.QA_PROMPT_HYBRID_RU_SYSTEM),
-            #     *hist,
-            #     HumanMessage(content=question),
-            # ]
-            recent_hist = hist[-4:] if len(hist) > 4 else hist
+
+            max_tool_history_tokens = self.config.MAX_TOOL_HISTORY_TOKENS
+            truncated_tool_hist = self._truncate_history_safe(hist, max_tool_history_tokens)
+            tool_hist_tokens = sum(
+                count_tokens(f"{m.type.capitalize()}: {m.content}")
+                for m in truncated_tool_hist
+            )
+
+            logger.debug(
+                f"[{user_id}] 🧠 Tool-check история сжата: {len(truncated_tool_hist)}/"
+                f"{len(hist)} сообщений ({tool_hist_tokens} токенов)"
+            )
+
             tool_messages: List[BaseMessage] = [
                 SystemMessage(content=self.config.QA_PROMPT_TOOL_CHECK_SYSTEM),
-                *recent_hist,
+                *truncated_tool_hist,
                 HumanMessage(content=question),
             ]
 
@@ -621,13 +822,30 @@ class RAGCore:
             # ВЕТКА A: МОДЕЛЬ ЗАПРОСИЛА ИНСТРУМЕНТ(Ы)
             # ═══════════════════════════════════════════════════════════════
             if first_response and getattr(first_response, "tool_calls", None):
-                # retrieval больше не нужен — отменяем чисто
-                if not retrieval_task.done():
-                    retrieval_task.cancel()
-                    try:
-                        await retrieval_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
+                # Ждём retrieval (он уже стартовал параллельно). Если запрос
+                # смешанный (RAG + tool) — его результат пойдёт в контекст LLM.
+                # Если чистый tool — потеряем 0–500мс, что приемлемо.
+                retrieval_docs: List[Document] = []
+                try:
+                    retrieval_docs = await asyncio.wait_for(
+                        retrieval_task, timeout=5.0
+                    )
+                    logger.info(
+                        "[%s] tool-flow: retrieval вернул %d docs (для RAG-контекста)",
+                        user_id, len(retrieval_docs),
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[%s] tool-flow: retrieval не успел за 5с — работаю без RAG",
+                        user_id,
+                    )
+                    if not retrieval_task.done():
+                        retrieval_task.cancel()
+                except Exception as e:
+                    logger.warning(
+                        "[%s] tool-flow: retrieval ошибка (%s) — работаю без RAG",
+                        user_id, e,
+                    )
 
                 yield {"type": "status", "text": "🛠️ Выполняю внешний запрос...\n"}
 
@@ -651,9 +869,62 @@ class RAGCore:
                 # Заменяем system-промпт роутера на боевой QA-промпт
                 # — иначе модель отвечает без правил стиля («не предлагай услуг», «кратко»)
                 tool_messages[0] = SystemMessage(content=self.config.QA_PROMPT_HYBRID_RU_SYSTEM)
+                # Если RAG что-то нашёл — добавляем контекст в tool-flow.
+                # Без этого смешанные запросы («камера + погода») теряют RAG-часть.
+                if retrieval_docs:
+                    try:
+                        rag_context, _, _ = self._build_context(retrieval_docs, hist)
+                        if rag_context.strip():
+                            # Вставляем как отдельный system сразу после основного —
+                            # модель видит и правила, и факты из документов
+                            tool_messages.insert(
+                                1,
+                                SystemMessage(content=(
+                                    "Дополнительный контекст из внутренних документов "
+                                    "(относится к части вопроса про инфраструктуру):\n"
+                                    f"{rag_context}"
+                                )),
+                            )
+                            logger.info(
+                                "[%s] tool-flow: RAG-контекст добавлен (%d chars)",
+                                user_id, len(rag_context),
+                            )
+                        else:
+                            logger.info(
+                                "[%s] tool-flow: RAG-контекст пуст (нет релевантных документов)",
+                                user_id,
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "[%s] tool-flow: не удалось построить RAG-контекст: %s",
+                            user_id, e,
+                        )
+
+                # ═══════════════════════════════════════════════════════════════
+                # ДИАГНОСТИКА ПРОМПТА (до вызова LLM)
+                # ═══════════════════════════════════════════════════════════════
+                self._log_prompt_stats(user_id, tool_messages, branch="tool-flow")
+                self._log_full_messages(user_id, tool_messages, branch="tool-flow")
+
+                # Валидация tool-flow: нет висячих tool_call_id
+                _open_ids = set()
+                for m in tool_messages:
+                    if m.type == "ai" and getattr(m, "tool_calls", None):
+                        for tc in m.tool_calls:
+                            _open_ids.add(tc["id"])
+                    elif m.type == "tool" and hasattr(m, "tool_call_id"):
+                        _open_ids.discard(m.tool_call_id)
+                if _open_ids:
+                    logger.error(
+                        f"[{user_id}] ⚠️ ВАЛИДАЦИЯ: {len(_open_ids)} tool_call_id без ответа — "
+                        f"API вернёт 400. IDs: {_open_ids}"
+                    )
 
                 full = ""
                 buffer = ""
+                llm_start = time.time()  # ★
+                ttft_seconds = 0.0  # ★
+                first_token_received = False  # ★
 
                 if not self.llm_limiter.is_available():
                     yield {"type": "status", "text": "⏳ Ожидаю свободный слот LLM...\n"}
@@ -662,6 +933,12 @@ class RAGCore:
                     async with self.llm_limiter.acquire(user_id=user_id):
                         async for chunk in self.llm.astream(tool_messages):
                             if content := chunk.content:
+                                if not first_token_received:
+                                    ttft_seconds = time.time() - llm_start  # ★ сохраняем
+                                    first_token_received = True
+                                    logger.debug(
+                                        f"[{user_id}] ⚡ [tool-flow] Первый токен за {ttft_seconds:.2f}с"
+                                    )
                                 full += content
                                 buffer += content
                                 if len(buffer) > 50 or content in ".!?\n":
@@ -678,11 +955,32 @@ class RAGCore:
                     yield {"type": "error", "text": "Произошла ошибка при генерации ответа."}
                     return
 
-                # История: только вопрос + финальный ответ (без ToolMessage и AIMessage-with-tool_calls)
+                # ═══════════════════════════════════════════════════════════════
+                # МЕТРИКИ TOOL-FLOW (после LLM)
+                # ═══════════════════════════════════════════════════════════════
                 if full.strip():
+                    generated_tokens = count_tokens(full)
+                    total_time = time.time() - start_time
+                    gen_time = time.time() - llm_start
+                    decode_time = max(gen_time - ttft_seconds, 0.001)
+                    decode_tps = generated_tokens / decode_time
+
+                    logger.info(
+                        f"[{user_id}] 📊 TOOL-FLOW: {generated_tokens} tok | "
+                        f"tools={[tc['name'] for tc in first_response.tool_calls]} | "
+                        f"TTFT={ttft_seconds:.2f}s | decode={decode_time:.2f}s | "
+                        f"decode_tok/s={decode_tps:.0f} | tool-flow={total_time:.2f}s"
+                    )
+
                     try:
                         h = self.get_history(user_id)
                         h.add_message(HumanMessage(content=question))
+                        h.add_message(first_response)
+                        for tc, result in zip(first_response.tool_calls, results):
+                            h.add_message(ToolMessage(
+                                content=json.dumps(result, ensure_ascii=False),
+                                tool_call_id=tc["id"],
+                            ))
                         h.add_message(AIMessage(content=full))
                     except Exception as e:
                         logger.exception(f"[{user_id}] ❌ Ошибка сохранения: {e}")
@@ -740,9 +1038,16 @@ class RAGCore:
                 history_summary=history_summary,
             )
 
+            # ═══════════════════════════════════════════════════════════════
+            # ДИАГНОСТИКА ПРОМПТА (до вызова LLM)
+            # ═══════════════════════════════════════════════════════════════
+            self._log_prompt_stats(user_id, messages, branch="RAG")
+            self._log_full_messages(user_id, messages, branch="RAG")
+
             full = ""
             buffer = ""
-            llm_start = time.time()
+            llm_start = time.time()  # ★
+            ttft_seconds = 0.0  # ★ — это инициализация, а не «сохранение в цикле»
             first_token_received = False
 
             if not self.llm_limiter.is_available():
@@ -753,11 +1058,11 @@ class RAGCore:
                     async for chunk in self.llm.astream(messages):
                         if content := chunk.content:
                             if not first_token_received:
-                                logger.debug(
-                                    f"[{user_id}] ⚡ Первый токен за "
-                                    f"{time.time() - llm_start:.2f}с"
-                                )
+                                ttft_seconds = time.time() - llm_start  # ★ сохраняем
                                 first_token_received = True
+                                logger.debug(
+                                    f"[{user_id}] ⚡ Первый токен за {ttft_seconds:.2f}с"
+                                )
                                 yield {"type": "status", "text": "🧠 Генерирую ответ...\n"}
                             full += content
                             buffer += content
@@ -775,13 +1080,24 @@ class RAGCore:
                 yield {"type": "error", "text": "Произошла ошибка при генерации ответа."}
                 return
 
+            # ═══════════════════════════════════════════════════════════════
+            # МЕТРИКИ RAG-FLOW (после LLM)
+            # ═══════════════════════════════════════════════════════════════
             if full.strip():
                 generated_tokens = count_tokens(full)
+                total_time = time.time() - start_time
                 gen_time = time.time() - llm_start
+                decode_time = max(gen_time - ttft_seconds, 0.001)
+                decode_tps = generated_tokens / decode_time
+                total_tps = generated_tokens / gen_time
+
                 logger.info(
-                    f"[{user_id}] 📊 генерация: {generated_tokens} токенов за {gen_time:.2f}с "
-                    f"(~{generated_tokens / gen_time:.0f} tok/s), chars={len(full)}"
+                    f"[{user_id}] 📊 RAG-FLOW: {generated_tokens} tok | "
+                    f"TTFT={ttft_seconds:.2f}s | decode={decode_time:.2f}s | "
+                    f"decode_tok/s={decode_tps:.0f} | total_tok/s={total_tps:.0f} | "
+                    f"RAG-flow={total_time:.2f}s | chars={len(full)}"
                 )
+
                 try:
                     h = self.get_history(user_id)
                     h.add_message(HumanMessage(content=question))
@@ -824,7 +1140,7 @@ class RAGCore:
 
         if self.collection_manager is not None:
             try:
-                self.collection_manager.redis.close()
+                await self.collection_manager.redis.close()
             except Exception:
                 pass
 

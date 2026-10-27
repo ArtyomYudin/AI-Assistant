@@ -12,7 +12,7 @@ async def demo_question(core: RAGCore, question: str, session_id: str = "demo") 
         core.create_qa_generator()
     print("\nQ:", question)
     print("A:", end=" ", flush=True)
-    async for token in core.qa_chain_with_history(question, session_id=session_id):
+    async for token in core.qa_chain_with_history(question, user_id=session_id):
         print(token, end="", flush=True)
     print("\n")
 
@@ -31,14 +31,14 @@ async def main():
     # Строим все коллекции по папкам
     await core.collection_manager.build_all_collections()
 
-    # Строим маршрутизатор коллекций
-    await core.collection_manager.build_router()
-
-    # await build_and_index(core)
-    core.create_retriever(k=cfg.K, fetch_k=cfg.FETCH_K)
-    await demo_question(core, "список камер видеонаблюдения?")
-    # resp = await core.collection_manager.routed_search("как получить доступ к камерам?")
-    # print(resp)
+    # # Строим маршрутизатор коллекций
+    # await core.collection_manager.build_router()
+    #
+    # # await build_and_index(core)
+    # core.create_retriever(k=cfg.K, fetch_k=cfg.FETCH_K)
+    # await demo_question(core, "список камер видеонаблюдения?")
+    # # resp = await core.collection_manager.routed_search("как получить доступ к камерам?")
+    # # print(resp)
 
     await core.close()
 

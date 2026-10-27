@@ -16,7 +16,7 @@ import json
 import logging
 from pathlib import Path
 from typing import List, Dict, Optional
-import redis
+import redis.asyncio as redis
 
 import numpy as np
 from langchain_core.documents import Document
@@ -156,11 +156,32 @@ class CollectionManager:
             socket_timeout=5,
         )
 
+    def _has_broad_intent(self, query: str) -> bool:
+        """
+        Определяет broad-intent: пользователь просит «всё», «список», «все X».
+        Для таких запросов reranker часто даёт низкий top_score (конкретные
+        чанки плохо матчатся с обобщающими словами), поэтому expansion нужен
+        даже при низком score.
+        """
+        if not query:
+            return False
+
+        q = query.lower()
+        broad_markers = (
+            "все ", "всех ", "всё ", "всего ", "весь ", "вся ",
+            "полный", "полностью", "полный список", "полный перечень",
+            "список", "перечень", "перечисли",
+            "какие есть", "что есть", "покажи все", "покажи всех",
+            "на предприятии", "предприятия", "объекта", "в целом",
+            "целиком", "по всем", "по всему",
+        )
+        return any(m in q for m in broad_markers)
 
     async def _drop_all_collections(self) -> None:
         """
-        Полностью удаляет все коллекции Milvus и очищает состояние роутера в Redis.
-        Вызывается из build_all_collections, если config.DROP_ALL_COLLECTIONS=True.
+        Полностью удаляет все коллекции Milvus и очищает ВСЁ состояние в Redis,
+        ссылающееся на коллекции: router_state, router_emb_*, chat_history:*,
+        last_used_collection:*.
         """
         logger.warning("DROP_ALL_COLLECTIONS=True — удаляю ВСЕ коллекции Milvus")
 
@@ -179,15 +200,30 @@ class CollectionManager:
             except Exception as e:
                 logger.exception("Ошибка при удалении коллекции '%s': %s", name, e)
 
-        # Очистка Redis: состояние роутера + векторы коллекций
+        # ── Очистка Redis: ВСЁ, что ссылается на коллекции ──
         try:
-            self.redis.delete(REDIS_ROUTER_KEY)
-            removed = 0
-            for key in self.redis.scan_iter(f"{REDIS_EMB_PREFIX}*"):
-                self.redis.delete(key)
-                removed += 1
+            # Состояние роутера + векторы коллекций
+            await self.redis.delete(REDIS_ROUTER_KEY)
+            removed_emb = 0
+            async for key in self.redis.scan_iter(f"{REDIS_EMB_PREFIX}*"):
+                await self.redis.delete(key)
+                removed_emb += 1
+
+            # last_used_collection:* (по сессиям) — роутер помнит «последнюю»
+            removed_last = 0
+            async for key in self.redis.scan_iter("last_used_collection:*"):
+                await self.redis.delete(key)
+                removed_last += 1
+
+            # chat_history:* — история со старыми ответами
+            removed_hist = 0
+            async for key in self.redis.scan_iter("chat_history:*"):
+                await self.redis.delete(key)
+                removed_hist += 1
+
             logger.info(
-                "Redis очищен: удалён router_state и %d векторов коллекций", removed
+                "Redis очищен: router_state + %d vectors + %d last_used + %d histories",
+                removed_emb, removed_last, removed_hist,
             )
         except Exception as e:
             logger.exception("Ошибка при очистке Redis: %s", e)
@@ -234,7 +270,114 @@ class CollectionManager:
                 self.collections.append(cname)
 
         # сохраняем имена коллекций
-        self._save_router_state()
+        await self._save_router_state()
+
+
+    async def _expand_strong_sources(
+            self,
+            merged: List[Document],
+            expansion_threshold: float,
+            max_expanded_sources: int,
+            max_chunks_per_source: int,
+    ) -> List[Document]:
+        """
+        Small-to-big: для каждого источника, у которого top-чанк достиг
+        expansion_threshold, подтягивает ВСЕ чанки этого источника из его коллекции.
+        Возвращает расширенный список (исходные чанки + добавленные).
+        """
+        if not merged:
+            return merged
+
+        # 1. Группируем кандидатов по source
+        by_source: dict[str, list[Document]] = {}
+        for d in merged:
+            src = d.metadata.get("source", "N/A")
+            by_source.setdefault(src, []).append(d)
+
+        # 2. Определяем, какие источники разворачивать
+        expandable = []
+        for src, docs in by_source.items():
+            top = max(d.metadata.get("score", 0.0) for d in docs)
+            if top >= expansion_threshold:
+                collection = docs[0].metadata.get("collection")
+                if collection:
+                    expandable.append((src, top, collection))
+
+        if not expandable:
+            return merged
+
+        expandable.sort(key=lambda x: x[1], reverse=True)
+        expandable = expandable[:max_expanded_sources]
+
+        # 3. Тянем все чанки из Milvus
+        seen_hashes = {d.metadata.get("hash") for d in merged if d.metadata.get("hash")}
+        expanded = list(merged)
+
+        for src, top_score, collection in expandable:
+            try:
+                res = await self.core.milvus.client.query(
+                    collection_name=collection,
+                    filter=f'source == "{src}"',
+                    output_fields=[
+                        "text", "title", "source", "hash",
+                        "bm25_text", "chunk_index",
+                    ],
+                    limit=max_chunks_per_source,
+                )
+            except Exception as e:
+                err = str(e).lower()
+                if "chunk_index" in err and ("not exist" in err or "invalid" in err):
+                    logger.warning(
+                        "Expansion: коллекция %s без поля chunk_index "
+                        "(создана до миграции) — перезапрашиваю без сортировки. "
+                        "Перезапустите /index для корректного порядка чанков.",
+                        collection,
+                    )
+                    res = await self.core.milvus.client.query(
+                        collection_name=collection,
+                        filter=f'source == "{src}"',
+                        output_fields=[
+                            "text", "title", "source", "hash", "bm25_text",
+                        ],
+                        limit=max_chunks_per_source,
+                    )
+                else:
+                    logger.warning(
+                        "Expansion: ошибка запроса source=%s: %s", src, e,
+                    )
+                    continue
+
+            # Сортировка ОДИН раз, после обоих try/except
+            res_sorted = sorted(res, key=lambda x: x.get("chunk_index", 0))
+
+            added = 0
+            for hit in res_sorted:
+                h = hit.get("hash")
+                if h and h in seen_hashes:
+                    continue
+                if h:
+                    seen_hashes.add(h)
+                expanded.append(Document(
+                    page_content=hit.get("text", ""),
+                    metadata={
+                        "title": hit.get("title", ""),
+                        "source": src,
+                        "hash": h,
+                        "bm25_text": hit.get("bm25_text"),
+                        "collection": collection,
+                        "score": top_score,
+                        "chunk_index": hit.get("chunk_index", 999),  # ★
+                        "expanded": True,
+                    },
+                ))
+                added += 1
+
+            logger.info(
+                "🪄 Expansion: source=%s, collection=%s, added=%d chunks (top_score=%.3f)",
+                src, collection, added, top_score,
+            )
+
+        return expanded
 
     # ----------------------------------------------------------
     # Реальная индексация документов в коллекцию Milvus
@@ -255,6 +398,10 @@ class CollectionManager:
             threshold_ratio: Optional[float] = None,
             min_absolute: Optional[float] = None,
             per_source_cap: Optional[int] = None,
+            expand_sources: bool = True,
+            expansion_threshold: float = 0.6,  # top-score источника для триггера
+            max_expanded_sources: int = 2,  # сколько источников разворачивать
+            max_chunks_per_source: int = 20,  # safety-cap на большой источник
     ) -> List[Document]:
         """
         Параллельный hybrid_search во всех коллекциях с per-collection фильтрацией.
@@ -342,7 +489,34 @@ class CollectionManager:
         logger.info("_search_in_collections per-collection: %s", " | ".join(stats))
 
         if not merged:
-            return []
+            # Broad intent: пользователь просит «все X», reranker дал низкие
+            # score — но документы, скорее всего, есть. Снижаем порог и
+            # пропускаем всё, что вернул hybrid_search (top_k на коллекцию).
+            if self._has_broad_intent(query):
+                logger.info(
+                    "Broad intent + пустой первичный поиск → мягкий порог "
+                    "(принимаю всё, что вернул reranker, без min_absolute)"
+                )
+                # Повторяем сборку с min_absolute=0.0
+                for cname, docs in zip(existing, results):
+                    if isinstance(docs, Exception) or not docs:
+                        continue
+                    local_max = max(d.metadata.get("score", 0.0) for d in docs)
+                    local_threshold = local_max * threshold_ratio  # без min_absolute
+                    for doc in docs:
+                        if doc.metadata.get("score", 0.0) >= local_threshold:
+                            doc.metadata["collection"] = cname
+                            merged.append(doc)
+                    logger.info(
+                        "Broad intent soft-threshold: %s kept %d/%d (thr=%.4f)",
+                        cname,
+                        len([d for d in merged if d.metadata.get("collection") == cname]),
+                        len(docs),
+                        local_threshold,
+                    )
+
+            if not merged:
+                return []
 
         # 4. Сортировка по score (важно: cap должен применяться к отсортированному)
         merged.sort(key=lambda d: d.metadata.get("score", 0.0), reverse=True)
@@ -365,6 +539,58 @@ class CollectionManager:
                 per_source_cap,
                 ", ".join(f"{src}: -{n}" for src, n in dropped_by_source.items()),
             )
+
+        # 5.5. ── EXPANSION BY SOURCE ──────────────────────────────
+        # Режим задаётся config.EXPANSION_MODE:
+        #   off    — ничего не разворачиваем (старое поведение)
+        #   always — по общему EXPANSION_THRESHOLD
+        #   smart  — broad intent → threshold=0, narrow → EXPANSION_THRESHOLD
+        if expand_sources and self.core.config.EXPANSION_MODE != "off":
+            mode = self.core.config.EXPANSION_MODE
+            base_threshold = self.core.config.EXPANSION_THRESHOLD
+            skip = False
+
+            if mode == "smart":
+                broad = self._has_broad_intent(query)
+                top_score = max((d.metadata.get("score", 0.0) for d in capped), default=0.0)
+                skip_max = self.core.config.EXPANSION_SKIP_MAX_MATCHED
+                skip_score = self.core.config.EXPANSION_SKIP_SCORE
+
+                # ★ Узкий+уверенный запрос: 1 чанк, score > 0.9 → это про конкретный чанк
+                if (
+                        not broad
+                        and skip_max > 0
+                        and skip_score > 0
+                        and len(capped) <= skip_max
+                        and top_score >= skip_score
+                ):
+                    skip = True
+                    logger.info(
+                        "Expansion mode=smart → skip (narrow+confident: %d chunk(s), "
+                        "top_score=%.3f ≥ %.2f) — документ не разворачиваю",
+                        len(capped), top_score, skip_score,
+                    )
+                elif broad:
+                    effective_threshold = 0.0
+                    reason = "smart/broad-intent (thr=0.0)"
+                else:
+                    effective_threshold = base_threshold
+                    reason = f"smart/narrow (thr={base_threshold})"
+            elif mode == "always":
+                effective_threshold = base_threshold
+                reason = f"always (thr={base_threshold})"
+            else:
+                effective_threshold = base_threshold
+                reason = f"fallback (thr={base_threshold})"
+
+            if not skip:
+                logger.info("Expansion mode=%s → %s", mode, reason)
+                capped = await self._expand_strong_sources(
+                    capped,
+                    expansion_threshold=effective_threshold,
+                    max_expanded_sources=self.core.config.MAX_EXPANDED_SOURCES,
+                    max_chunks_per_source=self.core.config.MAX_CHUNKS_PER_SOURCE,
+                )
 
         # 6. Дедуп по hash
         seen: set = set()
@@ -420,15 +646,35 @@ class CollectionManager:
 
     async def build_router(self):
         """
-        Если в Redis есть сохранённый роутер — восстанавливаем.
-        Иначе — строим с нуля и сохраняем.
-        """
-
-        restored = self._load_router_state()
+            Если в Redis есть сохранённый роутер — восстанавливаем,
+            но только если ВСЕ его коллекции существуют в Milvus.
+            """
+        restored = await    self._load_router_state()
         if restored:
-            logger.info("Роутер восстановлен из Redis")
-            self.router = restored
-            return
+            # ★ Проверяем, что все коллекции роутера реально есть в Milvus
+            try:
+                existing = set(await self.core.milvus.client.list_collections())
+            except Exception as e:
+                logger.warning("Не удалось проверить коллекции в Milvus: %s", e)
+                existing = None
+
+            if existing is not None:
+                phantom = [c for c in restored.collections if c not in existing]
+                if phantom:
+                    logger.warning(
+                        "🗑️ Роутер ссылается на несуществующие коллекции: %s — пересобираю",
+                        phantom,
+                    )
+                    # Сбрасываем — ниже построим заново
+                    await self.redis.delete(REDIS_ROUTER_KEY)
+                    async for key in self.redis.scan_iter(f"{REDIS_EMB_PREFIX}*"):
+                        await self.redis.delete(key)
+                    restored = None
+
+            if restored:
+                logger.info("Роутер восстановлен из Redis")
+                self.router = restored
+                return
 
         logger.info("Роутер отсутствует — создаём заново")
 
@@ -447,7 +693,7 @@ class CollectionManager:
                 docs, self.core.embeddings.embed_query
             )
             embeddings[name] = centroid
-            self._save_collection_vector(name, centroid)
+            await self._save_collection_vector(name, centroid)
 
         self.collections = list(embeddings.keys())
         self.router = CollectionRouter(embeddings)
@@ -490,7 +736,7 @@ class CollectionManager:
             logger.warning("Не удалось получить эмбеддинг для запроса: %r", query)
             return []
 
-        last = self.load_last_used_collection(conversation_id)
+        last = await self.load_last_used_collection(conversation_id)
 
         if last and self.is_followup_query(query):
             collections = [last]
@@ -499,13 +745,15 @@ class CollectionManager:
             collections = self.router.pick_collections(query_dense, top_k=2,  min_margin=0.1)
             logger.info("Роутер выбрал коллекции: %s", collections)
             if collections:
-                self.save_last_used_collection(collections[0], session_id=conversation_id)
+                await self.save_last_used_collection(collections[0], session_id=conversation_id)
 
         merged = await self._search_in_collections(query, query_dense, collections)
         logger.info(
             "routed_search: collections=%s, merged=%d", collections, len(merged)
         )
-        return merged[: self.core.config.K]
+        # пусть _build_context сам решает, что влезает в MAX_CONTEXT_TOKENS
+        # return merged[: self.core.config.K]
+        return merged
 
 
     async def routed_search_with_fallback(
@@ -531,7 +779,7 @@ class CollectionManager:
         if not query_dense:
             return []
 
-        last = self.load_last_used_collection(conversation_id)
+        last = await self.load_last_used_collection(conversation_id)
 
         if last and self.is_followup_query(query):
             collections = [last]
@@ -540,7 +788,7 @@ class CollectionManager:
             collections = self.router.pick_collections(query_dense, top_k=2,  min_margin=0.1)
             logger.info("Роутер выбрал коллекции: %s", collections)
             if collections:
-                self.save_last_used_collection(collections[0], session_id=conversation_id)
+                await self.save_last_used_collection(collections[0], session_id=conversation_id)
 
         merged = await self._search_in_collections(query, query_dense, collections)
         logger.info("Первичный поиск: collections=%s, docs=%d", collections, len(merged))
@@ -580,21 +828,21 @@ class CollectionManager:
     # ---------------------------------------------------------
     # Redis: сохранение состояния
     # ---------------------------------------------------------
-    def save_last_used_collection(self, name: str, session_id: str = "global"):
+    async def save_last_used_collection(self, name: str, session_id: str = "global"):
         key = f"last_used_collection:{session_id}"
         # Сохраняем как строку
-        self.redis.set(key, name)
+        await self.redis.set(key, name)
 
-    def load_last_used_collection(self, session_id: str = "global") -> Optional[str]:
+    async def load_last_used_collection(self, session_id: str = "global") -> Optional[str]:
         key = f"last_used_collection:{session_id}"
-        return self.redis.get(key)
+        return await self.redis.get(key)
 
-    def _save_router_state(self):
+    async def _save_router_state(self):
         state = {"collections": self.collections}
-        self.redis.set(REDIS_ROUTER_KEY, json.dumps(state).encode("utf-8"))
+        await self.redis.set(REDIS_ROUTER_KEY, json.dumps(state).encode("utf-8"))
 
-    def _load_router_state(self) -> Optional[CollectionRouter]:
-        raw = self.redis.get(REDIS_ROUTER_KEY)
+    async def _load_router_state(self) -> Optional[CollectionRouter]:
+        raw = await self.redis.get(REDIS_ROUTER_KEY)
         if not raw:
             return None
 
@@ -604,7 +852,7 @@ class CollectionManager:
         embeddings = {}
 
         for cname in collections:
-            vec = self._load_collection_vector(cname)
+            vec = await self._load_collection_vector(cname)
             if vec is None:
                 return None
             embeddings[cname] = vec
@@ -615,14 +863,14 @@ class CollectionManager:
     # Redis: embedding-векторы
     # ---------------------------------------------------------
 
-    def _save_collection_vector(self, name: str, vec: np.ndarray):
+    async def _save_collection_vector(self, name: str, vec: np.ndarray):
         key = f"{REDIS_EMB_PREFIX}{name}"
         data = base64.b64encode(vec.astype(np.float32).tobytes())
-        self.redis.set(key, data)
+        await self.redis.set(key, data)
 
-    def _load_collection_vector(self, name: str) -> Optional[np.ndarray]:
+    async def _load_collection_vector(self, name: str) -> Optional[np.ndarray]:
         key = f"{REDIS_EMB_PREFIX}{name}"
-        raw = self.redis.get(key)
+        raw = await self.redis.get(key)
         if not raw:
             return None
 
