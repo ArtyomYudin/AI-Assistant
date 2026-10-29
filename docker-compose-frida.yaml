@@ -373,6 +373,6 @@ services:
         - "7860:7860"  # Gradio по умолчанию слушает 7860
       volumes:
         - /storage/models/pimenovdv/T-lite-it-2.1-AWQ-4bits:/models/pimenovdv/T-lite-it-2.1-AWQ-4bits:ro
-      command: python -m ui.app  # запуск Gradio-приложения
+      command: python -m gradio.app  # запуск Gradio-приложения
       depends_on:
         - rag-api

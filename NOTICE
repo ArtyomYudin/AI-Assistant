@@ -1,0 +1,26 @@
+AI-Assistant RAG
+Copyright 2025 Artyom Yudin
+
+This product includes software developed by the organizations listed below.
+Their use is subject to the terms of their respective licenses.
+
+--------------------------------------------------------------------------------
+Third-Party Dependencies
+--------------------------------------------------------------------------------
+
+This product includes or is based on the following third-party software:
+
+* vLLM (https://github.com/vllm-project/vllm)
+  License: Apache License 2.0
+
+* Milvus (https://milvus.io/)
+  License: Apache License 2.0
+
+* FRIDA embeddings (https://huggingface.co/ai-forever/FRIDA)
+  License: MIT
+
+* BAAI/bge-reranker-v2-m3 (https://huggingface.co/BAAI/bge-reranker-v2-m3)
+  License: MIT
+
+* T-lite-it-2.1-AWQ (https://huggingface.co/t-tech/T-lite-it-2.1)
+  License: Apache License 2.0
