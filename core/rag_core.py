@@ -209,6 +209,8 @@ class RAGCore:
             self._tool_check_llm = self.llm_with_tools.bind(
                 max_tokens=64,
                 temperature=0.0,
+                presence_penalty=0.0,      # для tool-check не нужно
+                frequency_penalty=0.0,
             )
         return self._tool_check_llm
 
@@ -227,7 +229,15 @@ class RAGCore:
 
             # ★ Универсальный потолок — ни один инструмент не занимает >5 сек
             # ★ Поддержка StructuredTool (если кто-то обернёт в @tool)
-            coro = func.ainvoke(args) if hasattr(func, "ainvoke") else func(**args)
+            # coro = func.ainvoke(args) if hasattr(func, "ainvoke") else func(**args)
+            # result = await asyncio.wait_for(coro, timeout=5.0)
+
+            if asyncio.iscoroutinefunction(func):
+                coro = func(**args)
+            elif hasattr(func, "ainvoke"):
+                coro = func.ainvoke(args)
+            else:
+                coro = asyncio.to_thread(func, **args)
             result = await asyncio.wait_for(coro, timeout=5.0)
 
             if not isinstance(result, dict):
@@ -238,7 +248,7 @@ class RAGCore:
             logger.warning("⏱️ tool %s превысил 5 сек — прерываю", name)
             return {"error": f"Инструмент {name} не ответил вовремя"}
         except TypeError as e:
-            logger.exception("Неверные аргументы для %s(%s): %s", name, args, e)
+            logger.warning("Неверные аргументы для %s(%s): %s", name, args, e)
             return {"error": f"Неверные аргументы для {name}: {e}"}
         except Exception as e:
             logger.exception("Ошибка выполнения %s: %s", name, e)
@@ -539,14 +549,25 @@ class RAGCore:
         # ── УРОВЕНЬ 4: совсем крайний случай — только Human ──
         return tail[:1]
 
+
     # ─────────────────────────────────────────────────────────────
     # Контекст и сообщения
     # ─────────────────────────────────────────────────────────────
+
+    def _get_system_prompt(self, mode: str) -> str:
+        """Единая точка выбора system-промпта по режиму (RAG и tool-flow)."""
+        if mode == "rag":
+            return self.config.QA_PROMPT_RAG_SYSTEM
+        if mode == "llm_only":
+            return self.config.QA_PROMPT_LLM_ONLY_SYSTEM
+        return self.config.QA_PROMPT_HYBRID_RU_SYSTEM
+
 
     def _build_context(
             self,
             docs: List[Document],
             history: List[BaseMessage],
+            question: str = "",
     ) -> tuple[str, List[BaseMessage], str]:
         """
         Формирует контекст для LLM.
@@ -558,6 +579,8 @@ class RAGCore:
           - fallback: если ни один источник не влез — старое поведение с truncate
             на top-чанках, чтобы модель не осталась с пустым контекстом
         """
+        question_tokens = count_tokens(question or "")
+
         # ── 1. История (без изменений) ───────────────────────────────
         truncated_history = self._truncate_history_safe(
             history, self.config.MAX_HISTORY_TOKENS
@@ -584,18 +607,19 @@ class RAGCore:
                 - self.config.RESERVED_FOR_COMPLETION
                 - history_tokens
                 - self.config.RESERVED_FOR_OVERHEAD
+                - question_tokens
         )
         available = max(0, available)
         if available <= 0:
             return "", truncated_history, history_summary
 
-        # ── 3. Группировка по source ─────────────────────────────────
+        # ── Группировка по source ─────────────────────────────────
         by_source: dict[str, list[Document]] = {}
         for d in docs:
             src = d.metadata.get("source", "N/A")
             by_source.setdefault(src, []).append(d)
 
-        # ── 4. Сортировка источников по их top-score ─────────────────
+        # ── Сортировка источников по их top-score ─────────────────
         source_groups = sorted(
             by_source.items(),
             key=lambda kv: max(d.metadata.get("score", 0.0) for d in kv[1]),
@@ -612,7 +636,7 @@ class RAGCore:
             else:
                 chunks.sort(key=lambda d: -d.metadata.get("score", 0.0))
 
-        # ── 5. Сборка: источник целиком или пропуск ──────────────────
+        # ── Сборка: источник целиком или пропуск ──────────────────
         parts: list[str] = []
         used = 0
         included: list[tuple[str, int, int]] = []  # (source, chunks, tokens)
@@ -632,7 +656,7 @@ class RAGCore:
             used += src_tokens
             included.append((src, len(chunks), src_tokens))
 
-        # ── 6. FALLBACK: ни один источник не влез целиком ────────────
+        # ── FALLBACK: ни один источник не влез целиком ────────────
         #    Старое поведение: top-чанки с truncate.
         #    Лучше частичный контекст, чем пустой.
         if not parts and docs:
@@ -658,7 +682,7 @@ class RAGCore:
 
         context = "".join(parts).strip()
 
-        # ── 7. Диагностика ───────────────────────────────────────────
+        # ── Диагностика ───────────────────────────────────────────
         if included or skipped:
             logger.info(
                 "Context: included=%d [%s] | skipped=%d [%s] | used=%d/%d tok",
@@ -673,36 +697,46 @@ class RAGCore:
         return context, truncated_history, history_summary
 
     def _build_messages(
-        self,
-        mode: str,
-        question: str,
-        context: str,
-        truncated_history: List[BaseMessage],
-        history_summary: str = "",
+            self,
+            mode: str,
+            question: str,
+            context: str,
+            truncated_history: List[BaseMessage],
+            history_summary: str = "",
     ) -> List[BaseMessage]:
         """
+        Собирает промпт для LLM в RAG-ветке.
+
         Структура:
-          1) SystemMessage: правила (+ резюме истории)
-          2) truncated_history: user/assistant в исходных ролях
-          3) HumanMessage: контекст + текущий вопрос
+          1) SystemMessage — правила режима (СТАТИЧНЫЙ между ходами!)
+          2) SystemMessage — резюме обрезанных сообщений (только при truncation)
+          3) truncated_history — пары user/assistant из истории
+          4) HumanMessage — «Контекст:\n{...}\n\nВопрос: {question}»
+
+        Ключевые принципы:
+          - System СТАТИЧЕН между ходами → cache hit на System.
+          - history_summary — отдельным System, только при truncation.
+          - user_content (текущий Human с контекстом) НЕ сохраняется в историю
+            (в историю пишется Human(question) без контекста — см. RAG-ветку).
+            Это значит, что на следующем ходу prefix-cache покрывает историю
+            до Human(question_N), но не сам Human(question_N+ctx_N).
+            Результат: TTFT ~0.3-0.5с вместо ~0.2с — приемлемый трейдофф за
+            компактную историю.
         """
-        system_content = self.config.QA_PROMPT_HYBRID_RU_SYSTEM
-        if mode == "rag":
-            system_content = getattr(self.config, "QA_PROMPT_RAG_SYSTEM", system_content)
-        elif mode == "llm_only":
-            system_content = getattr(self.config, "QA_PROMPT_LLM_ONLY_SYSTEM", system_content)
-
-        if history_summary:
-            system_content = (
-                f"{system_content}\n\n"
-                f"---\n"
-                f"КОНТЕКСТ ПРЕДЫДУЩЕГО ДИАЛОГА (не факты, только для связности):\n"
-                f"{history_summary}"
-            )
-
+        # ── System — статичный, БЕЗ summary ────────────────────────
+        system_content = self._get_system_prompt(mode)
         messages: List[BaseMessage] = [SystemMessage(content=system_content)]
+
+        # ── Резюме старых сообщений — отдельным system ─────────────
+        # ★ Не добавляем внутрь system_content — иначе System меняется
+        #   каждый ход, когда truncation срабатывает, и prefix-cache рвётся.
+        if history_summary:
+            messages.append(SystemMessage(content=history_summary))
+
+        # ── История ────────────────────────────────────────────────
         messages.extend(truncated_history)
 
+        # ── Текущий вопрос с контекстом ────────────────────────────
         if context.strip():
             user_content = f"Контекст:\n{context}\n\nВопрос: {question}"
         else:
@@ -880,14 +914,15 @@ class RAGCore:
 
                 yield {"type": "status", "text": "🧠 Формирую ответ...\n"}
 
+
                 # Заменяем system-промпт роутера на боевой QA-промпт
                 # — иначе модель отвечает без правил стиля («не предлагай услуг», «кратко»)
-                tool_messages[0] = SystemMessage(content=self.config.QA_PROMPT_HYBRID_RU_SYSTEM)
+                tool_messages[0] = SystemMessage(content=self._get_system_prompt(self.config.MODE))
                 # Если RAG что-то нашёл — добавляем контекст в tool-flow.
                 # Без этого смешанные запросы («камера + погода») теряют RAG-часть.
                 if retrieval_docs:
                     try:
-                        rag_context, _, _ = self._build_context(retrieval_docs, hist)
+                        rag_context, _, _ = self._build_context(retrieval_docs, hist, question)
                         if rag_context.strip():
                             # Вставляем как отдельный system сразу после основного —
                             # модель видит и правила, и факты из документов
@@ -946,7 +981,8 @@ class RAGCore:
                 try:
                     async with self.llm_limiter.acquire(user_id=user_id):
                         async for chunk in self.llm.astream(tool_messages):
-                            if content := chunk.content:
+                            content = chunk.content
+                            if content:
                                 if not first_token_received:
                                     ttft_seconds = time.time() - llm_start  # ★ сохраняем
                                     first_token_received = True
@@ -1015,6 +1051,33 @@ class RAGCore:
                 yield {"type": "error", "text": "Ошибка при поиске документов."}
                 return
 
+            # ═══════════════════════════════════════════════════════════════
+            # FOLLOW-UP RETRY: пустой retrieval + есть история → пробуем
+            # с последним вопросом пользователя в качестве контекста.
+            # Решает «на первом и цокольном?» после «камеры на 2 этаже?»,
+            # когда короткий follow-up не находит документов самостоятельно.
+            # ═══════════════════════════════════════════════════════════════
+            if not docs and hist:
+                last_human = next(
+                    (m.content for m in reversed(hist) if m.type == "human"),
+                    None,
+                )
+                if last_human and last_human.strip() != question.strip():
+                    combined = f"{last_human} {question}"
+                    logger.info(
+                        f"[{user_id}] 🔁 follow-up retry: "
+                        f"'{last_human[:50]}…' + '{question[:50]}…'"
+                    )
+                    try:
+                        docs = await self.retriever(combined, user_id)
+                        logger.info(
+                            f"[{user_id}] 🔁 follow-up retry → docs={len(docs)}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[{user_id}] follow-up retry failed: {e}"
+                        )
+
             if not docs:
                 if self.config.MODE == "rag":
                     yield {"type": "info", "text": "Информация не найдена."}
@@ -1025,7 +1088,7 @@ class RAGCore:
             yield {"type": "status", "text": "✅ Документы найдены. Формирую ответ...\n"}
 
             try:
-                context, truncated_history, history_summary = self._build_context(docs, hist)
+                context, truncated_history, history_summary = self._build_context(docs, hist, question)
                 logger.info(
                     f"[{user_id}] retrieval: docs={len(docs)}, "
                     f"context_chars={len(context)}, "
