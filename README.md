@@ -400,7 +400,7 @@ The server is at 172.30.4.135.
 │   │   ├── weather_tool.py       # get_weather (wttr.in)
 │   │   └── kb_tool.py            # search_knowledge_base
 │   └── utils.py                  # count_tokens, hash_text, JWT
-├── gradio/
+├── ui/
 │   └── app.py                    # Gradio UI
 ├── docker/
 │   ├── Dockerfile                # RAG API

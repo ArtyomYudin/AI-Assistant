@@ -400,7 +400,7 @@ curl -X POST "http://localhost:8008/merge-session?old_session_id=anon_abc" \
 │   │   ├── weather_tool.py       # get_weather (wttr.in)
 │   │   └── kb_tool.py            # search_knowledge_base
 │   └── utils.py                  # count_tokens, hash_text, JWT
-├── gradio/
+├── ui/
 │   └── app.py                    # Gradio UI
 ├── docker/
 │   ├── Dockerfile                # RAG API
