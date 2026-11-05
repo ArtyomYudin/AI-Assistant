@@ -55,9 +55,9 @@ services:
       --served-model-name T-lite-it-2.1-AWQ
       --dtype float16
       --gpu-memory-utilization 0.90
-      --max-model-len 8192
-      --max-num-batched-tokens 8192
-      --max-num-seqs 16
+      --max-model-len 12288
+      --max-num-batched-tokens 12288
+      --max-num-seqs 8
       --enable-prefix-caching
       --port 8001
       --enable-auto-tool-choice
