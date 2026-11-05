@@ -340,14 +340,14 @@ services:
       - LLM_FREQUENCY_PENALTY=0.2
       - LLM_TOP_P=0.8
       - LLM_TOP_K=20
-      - K=7
+      - K=6
       - FETCH_K=20
-      - MAX_CONTEXT_TOKENS=5120
-      - RESERVED_FOR_COMPLETION=2048
-      - RESERVED_FOR_OVERHEAD=1024
-      - MAX_HISTORY_MESSAGES=4
-      - MAX_HISTORY_TOKENS=1024
-      - MAX_TOOL_HISTORY_TOKENS=2048
+      - MAX_CONTEXT_TOKENS=11400
+      - RESERVED_FOR_COMPLETION=1024
+      - RESERVED_FOR_OVERHEAD=300
+      - MAX_HISTORY_MESSAGES=12
+      - MAX_HISTORY_TOKENS=4000
+      - MAX_TOOL_HISTORY_TOKENS=3500
     ports:
       - "8008:8008"
     volumes:
@@ -370,23 +370,23 @@ services:
       container_name: rag-gradio
       restart: unless-stopped
       environment:
-        - PYTHONUNBUFFERED=1
-        - LOG_LEVEL=DEBUG
-        - MODE=rag
-        - LLM_MAX_TOKEN=2048
-        - LLM_TEMPERATURE=0.7
-        - LLM_PRESENCE_PENALTY=0.4
-        - LLM_FREQUENCY_PENALTY=0.2
-        - LLM_TOP_P=0.8
-        - LLM_TOP_K=20
-        - K=7
-        - FETCH_K=20
-        - MAX_CONTEXT_TOKENS=5120
-        - RESERVED_FOR_COMPLETION=2048
-        - RESERVED_FOR_OVERHEAD=1024
-        - MAX_HISTORY_MESSAGES=4
-        - MAX_HISTORY_TOKENS=1024
-        - MAX_TOOL_HISTORY_TOKENS=2048
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=DEBUG
+      - MODE=rag
+      - LLM_MAX_TOKEN=2048
+      - LLM_TEMPERATURE=0.7
+      - LLM_PRESENCE_PENALTY=0.4
+      - LLM_FREQUENCY_PENALTY=0.2
+      - LLM_TOP_P=0.8
+      - LLM_TOP_K=20
+      - K=6
+      - FETCH_K=20
+      - MAX_CONTEXT_TOKENS=11400
+      - RESERVED_FOR_COMPLETION=1024
+      - RESERVED_FOR_OVERHEAD=300
+      - MAX_HISTORY_MESSAGES=12
+      - MAX_HISTORY_TOKENS=4000
+      - MAX_TOOL_HISTORY_TOKENS=3500
       ports:
         - "7860:7860"  # Gradio по умолчанию слушает 7860
       volumes:
