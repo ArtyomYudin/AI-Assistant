@@ -15,5 +15,6 @@ pydantic-settings
 httpx
 redis
 docling
+docling-core
 python-jose[cryptography]
 transformers>=4.40
