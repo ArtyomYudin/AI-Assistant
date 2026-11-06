@@ -1,4 +1,4 @@
-# core/local_embeddings.py
+# core/models/local_embeddings.py
 
 # Copyright 2025 Artyom Yudin
 #

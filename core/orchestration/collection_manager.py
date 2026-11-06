@@ -1,4 +1,4 @@
-# core/collection_manager.py
+# core/orchestration/collection_manager.py
 
 # Copyright 2025 Artyom Yudin
 #
@@ -29,13 +29,16 @@ import base64
 import json
 import logging
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable, Awaitable
 import redis.asyncio as redis
 
 import numpy as np
 from langchain_core.documents import Document
 
-from core.milvus_manager import MilvusManager
+from config.rag_config import RAGConfig
+from core.models.model_provider import ModelProvider
+from core.storage.milvus_manager import MilvusManager
+from core.ingestion.document_indexer import DocumentIndexer
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +150,16 @@ class CollectionManager:
     - выбор коллекции
     """
 
-    def __init__(self, core):
+    def __init__(
+            self,
+            *,
+            config: RAGConfig,
+            milvus: MilvusManager,
+            indexer: DocumentIndexer,
+            models: ModelProvider,
+            load_documents_fn: Callable[[str], List[Document]],
+            get_embedding_cached_fn: Callable[[str], Awaitable[Optional[List[float]]]],
+    ):
         """
         core — инстанс RAGCore
         Содержит:
@@ -156,14 +168,19 @@ class CollectionManager:
             - splitters
             - milvus (основной, можно создавать новые для каждой коллекции)
         """
-        self.core = core
+        self.config = config
+        self.milvus = milvus
+        self.indexer = indexer
+        self.models = models
+        self._load_documents = load_documents_fn
+        self._get_embedding_cached = get_embedding_cached_fn
         self.router: Optional[CollectionRouter] = None
         # self.collections: dict[str, MilvusManager] = {}  # имена коллекций -> менеджеры Milvus
         self.collections: List[str] = []  # имена коллекций
         # self.last_used_collection: Optional[str] = None
         self.redis = redis.StrictRedis(
-            host=self.core.config.REDIS_HOST,
-            port=self.core.config.REDIS_PORT,
+            host=self.config.REDIS_HOST,
+            port=self.config.REDIS_PORT,
             db= 0,
             decode_responses=True,
             socket_connect_timeout=5,
@@ -200,7 +217,7 @@ class CollectionManager:
         logger.warning("DROP_ALL_COLLECTIONS=True — удаляю ВСЕ коллекции Milvus")
 
         try:
-            existing = await self.core.milvus.client.list_collections()
+            existing = await self.milvus.client.list_collections()
         except Exception as e:
             logger.exception("Не удалось получить список коллекций Milvus: %s", e)
             existing = []
@@ -209,7 +226,7 @@ class CollectionManager:
 
         for name in existing:
             try:
-                await self.core.milvus.client.drop_collection(name)
+                await self.milvus.client.drop_collection(name)
                 logger.info("Коллекция '%s' удалена", name)
             except Exception as e:
                 logger.exception("Ошибка при удалении коллекции '%s': %s", name, e)
@@ -255,14 +272,14 @@ class CollectionManager:
         """
 
         # 1. Опционально: полная очистка перед переиндексацией
-        if getattr(self.core.config, "DROP_ALL_COLLECTIONS", False):
+        if getattr(self.config, "DROP_ALL_COLLECTIONS", False):
             await self._drop_all_collections()
             logger.warning(
                 "DROP_ALL_COLLECTIONS=True сработал — коллекции удалены. "
                 "Не забудьте выставить флаг обратно в False."
             )
 
-        root = Path(self.core.config.DATA_DIR)
+        root = Path(self.config.DATA_DIR)
         if not root.exists():
             logger.error("DATA_DIR не существует: %s", root)
             return
@@ -274,7 +291,7 @@ class CollectionManager:
             cname = folder.name
             logger.info("Индексация коллекции: %s", cname)
 
-            docs = self.core.load_documents(str(folder))
+            docs = self._load_documents(str(folder))
             if not docs:
                 logger.warning("Папка %s пуста — пропускаю", folder)
                 continue
@@ -329,7 +346,7 @@ class CollectionManager:
 
         for src, top_score, collection in expandable:
             try:
-                res = await self.core.milvus.client.query(
+                res = await self.milvus.client.query(
                     collection_name=collection,
                     filter=f'source == "{src}"',
                     output_fields=[
@@ -347,7 +364,7 @@ class CollectionManager:
                         "Перезапустите /index для корректного порядка чанков.",
                         collection,
                     )
-                    res = await self.core.milvus.client.query(
+                    res = await self.milvus.client.query(
                         collection_name=collection,
                         filter=f'source == "{src}"',
                         output_fields=[
@@ -399,7 +416,7 @@ class CollectionManager:
 
     async def _index_collection(self, collection_name: str, docs: List[Document]):
         """Индексирует документы в указанную коллекцию (делегирует в RAGCore)."""
-        total = await self.core._index_documents(collection_name, docs)
+        total = await self.indexer.index_documents(collection_name, docs)
         if total == 0:
             logger.warning("_index_collection: %s — 0 фрагментов", collection_name)
 
@@ -433,11 +450,11 @@ class CollectionManager:
         """
 
         if threshold_ratio is None:
-            threshold_ratio = self.core.config.COLLECTION_THRESHOLD_RATIO
+            threshold_ratio = self.config.COLLECTION_THRESHOLD_RATIO
         if min_absolute is None:
-            min_absolute = self.core.config.COLLECTION_MIN_ABSOLUTE
+            min_absolute = self.config.COLLECTION_MIN_ABSOLUTE
         if per_source_cap is None:
-            per_source_cap = self.core.config.PER_SOURCE_CAP
+            per_source_cap = self.config.PER_SOURCE_CAP
 
         if not collections:
             return []
@@ -446,8 +463,8 @@ class CollectionManager:
         existing: List[str] = []
         for cname in collections:
             try:
-                if await self.core.milvus.client.has_collection(cname):
-                    await self.core.milvus.ensure_collection_loaded(cname)
+                if await self.milvus.client.has_collection(cname):
+                    await self.milvus.ensure_collection_loaded(cname)
                     existing.append(cname)
                 else:
                     logger.warning("Коллекция %s не найдена — пропускаю", cname)
@@ -459,15 +476,15 @@ class CollectionManager:
 
         # 2. Параллельный поиск БЕЗ глобальной фильтрации
         tasks = [
-            self.core.milvus.hybrid_search(
+            self.milvus.hybrid_search(
                 query_text=query,
                 query_dense=query_dense,
-                fetch_k=self.core.config.FETCH_K,
-                top_k=self.core.config.K,
+                fetch_k=self.config.FETCH_K,
+                top_k=self.config.K,
                 collection_name=cname,
-                reranker_endpoint=self.core.config.RERANKER_BASE_URL,
+                reranker_endpoint=self.config.RERANKER_BASE_URL,
                 apply_filter=False,  # ← ключевое: фильтр применяем сами
-                score_threshold=self.core.config.HYBRID_SEARCH_SCORE_THRESHOLD
+                score_threshold=self.config.HYBRID_SEARCH_SCORE_THRESHOLD
             )
             for cname in existing
         ]
@@ -559,16 +576,16 @@ class CollectionManager:
         #   off    — ничего не разворачиваем (старое поведение)
         #   always — по общему EXPANSION_THRESHOLD
         #   smart  — broad intent → threshold=0, narrow → EXPANSION_THRESHOLD
-        if expand_sources and self.core.config.EXPANSION_MODE != "off":
-            mode = self.core.config.EXPANSION_MODE
-            base_threshold = self.core.config.EXPANSION_THRESHOLD
+        if expand_sources and self.config.EXPANSION_MODE != "off":
+            mode = self.config.EXPANSION_MODE
+            base_threshold = self.config.EXPANSION_THRESHOLD
             skip = False
 
             if mode == "smart":
                 broad = self._has_broad_intent(query)
                 top_score = max((d.metadata.get("score", 0.0) for d in capped), default=0.0)
-                skip_max = self.core.config.EXPANSION_SKIP_MAX_MATCHED
-                skip_score = self.core.config.EXPANSION_SKIP_SCORE
+                skip_max = self.config.EXPANSION_SKIP_MAX_MATCHED
+                skip_score = self.config.EXPANSION_SKIP_SCORE
 
                 # ★ Узкий+уверенный запрос: 1 чанк, score > 0.9 → это про конкретный чанк
                 if (
@@ -602,8 +619,8 @@ class CollectionManager:
                 capped = await self._expand_strong_sources(
                     capped,
                     expansion_threshold=effective_threshold,
-                    max_expanded_sources=self.core.config.MAX_EXPANDED_SOURCES,
-                    max_chunks_per_source=self.core.config.MAX_CHUNKS_PER_SOURCE,
+                    max_expanded_sources=self.config.MAX_EXPANDED_SOURCES,
+                    max_chunks_per_source=self.config.MAX_CHUNKS_PER_SOURCE,
                 )
 
         # 6. Дедуп по hash
@@ -667,7 +684,7 @@ class CollectionManager:
         if restored:
             # ★ Проверяем, что все коллекции роутера реально есть в Milvus
             try:
-                existing = set(await self.core.milvus.client.list_collections())
+                existing = set(await self.milvus.client.list_collections())
             except Exception as e:
                 logger.warning("Не удалось проверить коллекции в Milvus: %s", e)
                 existing = None
@@ -692,19 +709,19 @@ class CollectionManager:
 
         logger.info("Роутер отсутствует — создаём заново")
 
-        root = Path(self.core.config.DATA_DIR)
+        root = Path(self.config.DATA_DIR)
         subdirs = [p for p in root.iterdir() if p.is_dir()]
 
         embeddings = {}
 
         for folder in subdirs:
             name = folder.name
-            docs = self.core.load_documents(str(folder))
+            docs = self._load_documents(str(folder))
             if not docs:
                 continue
 
             centroid = await build_collection_embedding(
-                docs, self.core.embeddings.embed_query
+                docs, self.models.embeddings.embed_query
             )
             embeddings[name] = centroid
             await self._save_collection_vector(name, centroid)
@@ -725,7 +742,7 @@ class CollectionManager:
         if not self.router:
             raise RuntimeError("Router не создан: вызови build_router().")
 
-        qvec = await self.core.embeddings.embed_query(query)
+        qvec = await self.models.embeddings.embed_query(query)
         return self.router.pick_collection(qvec)
 
     # ----------------------------------------------------------
@@ -745,7 +762,7 @@ class CollectionManager:
             await self.build_router()
 
         # Эмбеддинг запроса — один раз для routing и для поиска
-        query_dense = await self.core._get_embedding_cached(query)
+        query_dense = await self._get_embedding_cached(query)
         if not query_dense:
             logger.warning("Не удалось получить эмбеддинг для запроса: %r", query)
             return []
@@ -766,7 +783,7 @@ class CollectionManager:
             "routed_search: collections=%s, merged=%d", collections, len(merged)
         )
         # пусть _build_context сам решает, что влезает в MAX_CONTEXT_TOKENS
-        # return merged[: self.core.config.K]
+        # return merged[: self.config.K]
         return merged
 
 
@@ -783,13 +800,13 @@ class CollectionManager:
         if conversation_id is None:
             conversation_id = "global"
         # if min_relevant is None:
-        #     min_relevant = max(1, self.core.config.K // 2)
+        #     min_relevant = max(1, selfconfig.K // 2)
 
 
         if not self.router:
             await self.build_router()
 
-        query_dense = await self.core._get_embedding_cached(query)
+        query_dense = await self._get_embedding_cached(query)
         if not query_dense:
             return []
 
@@ -836,7 +853,7 @@ class CollectionManager:
                 merged.sort(key=lambda d: d.metadata.get("score", 0.0), reverse=True)
                 logger.info("Fallback завершён: docs=%d", len(merged))
 
-        return merged[: self.core.config.K]
+        return merged[: self.config.K]
 
 
     # ---------------------------------------------------------

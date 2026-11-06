@@ -1,0 +1,216 @@
+# core/common/text.py
+
+# Copyright 2025 Artyom Yudin
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import hashlib
+import logging
+import os
+import re
+import time as _time
+from typing import Optional
+
+import tiktoken
+
+import config.rag_config
+from core.common.settings import get_config
+
+logger = logging.getLogger(__name__)
+
+# ── Токенизатор: кэш (родной HF + tiktoken fallback) ─────────────
+
+_native_tokenizer = None
+_native_tokenizer_failed = False
+_fallback_tokenizer = None
+
+_last_attempt = 0.0
+RETRY_INTERVAL = 86400.0
+
+
+def _resolve_model_path() -> Optional[str]:
+    """
+    Определяет путь к папке модели по приоритету:
+    1. env LLM_MODEL_PATH (проброшено из docker-compose)
+    2. config.RAGConfig.LLM_MODEL_PATH (если поле добавлено)
+    3. None — тогда используется fallback
+    """
+    path = os.getenv("LLM_MODEL_PATH")
+    if path:
+        return path
+
+    try:
+        return get_config().LLM_MODEL_PATH
+    except Exception:
+        return None
+
+
+def _load_native_tokenizer():
+    """
+    Ленивая загрузка родного токенизатора модели из LLM_MODEL_PATH.
+    При первой ошибке выставляет флаг _native_tokenizer_failed,
+    чтобы не пытаться снова на каждый вызов.
+    """
+    global _native_tokenizer, _native_tokenizer_failed, _last_attempt
+
+    if _native_tokenizer is not None:
+        return _native_tokenizer
+
+    now = _time.monotonic()
+    if _native_tokenizer_failed and (now - _last_attempt) < RETRY_INTERVAL:
+        return None
+    _last_attempt = now
+
+    path = _resolve_model_path()
+    if not path:
+        logger.warning(
+            "LLM_MODEL_PATH не задан — используется tiktoken fallback. "
+            "Задайте LLM_MODEL_PATH в docker-compose для точного подсчёта токенов."
+        )
+        _native_tokenizer_failed = True
+        return None
+
+    try:
+        from transformers import AutoTokenizer
+        _native_tokenizer = AutoTokenizer.from_pretrained(
+            path,
+            trust_remote_code=True,
+            local_files_only=True,
+        )
+        _native_tokenizer_failed = False
+        logger.info("Родной токенизатор загружен: %s", path)
+        return _native_tokenizer
+    except Exception as e:
+        logger.warning(
+            "Не удалось загрузить родной токенизатор из %s (%s). "
+            "Использую tiktoken с калибровкой под русский.",
+            path, e,
+        )
+        _native_tokenizer_failed = True
+        return None
+
+
+def _get_fallback_tokenizer():
+    global _fallback_tokenizer
+    if _fallback_tokenizer is None:
+        _fallback_tokenizer = tiktoken.get_encoding("cl100k_base")
+    return _fallback_tokenizer
+
+
+def get_tokenizer():
+    """Родной токенизатор модели, если доступен, иначе tiktoken cl100k_base."""
+    native = _load_native_tokenizer()
+    return native if native is not None else _get_fallback_tokenizer()
+
+
+def _encode(tokenizer, text: str):
+    """Универсальная обёртка encode: HF и tiktoken принимают разные kwargs."""
+    try:
+        return tokenizer.encode(text, add_special_tokens=False)
+    except TypeError:
+        return tokenizer.encode(text)
+
+
+def _decode(tokenizer, ids):
+    """Универсальная обёртка decode."""
+    try:
+        return tokenizer.decode(ids, skip_special_tokens=True)
+    except TypeError:
+        return tokenizer.decode(ids)
+
+
+def count_tokens(text: Optional[str], tokenizer=None) -> int:
+    """
+    Считает токены через родной токенизатор модели.
+    Если он недоступен — fallback на tiktoken с калибровкой:
+    cl100k завышает русский ~1.33x, поэтому умножаем на 0.75.
+    """
+    if tokenizer is None:
+        tokenizer = get_tokenizer()
+
+    if not text:
+        return 0
+
+    if tokenizer is _native_tokenizer and _native_tokenizer is not None:
+        return len(_encode(tokenizer, text))
+
+    return int(len(_encode(tokenizer, text)) * 0.75)
+
+
+def truncate_text_by_tokens(text: str, max_tokens: int, tokenizer=None) -> str:
+    if tokenizer is None:
+        tokenizer = get_tokenizer()
+
+    if not text:
+        return ""
+
+    tokens = _encode(tokenizer, text)
+    if len(tokens) <= max_tokens:
+        return text
+
+    return _decode(tokenizer, tokens[:max_tokens])
+
+
+# ── Хэши ───────────────────────────────────────────────────────
+
+def hash_text(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+# ── Markdown / BM25 ────────────────────────────────────────────
+
+def clean_md_content(content: str) -> str:
+    if not content:
+        return ""
+    content = re.sub(r"<!--.*?-->", "", content, flags=re.DOTALL)
+    content = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", content)
+    content = re.sub(r"!\[([^\]]*)\]\([^\)]+\)", "", content)
+    content = re.sub(r"\n\s*\n", "\n\n", content)
+    return content.strip()
+
+
+def extract_global_bm25_text(md_content: str) -> Optional[str]:
+    """Извлекает <!-- bm25: ... --> из всего документа."""
+    match = re.search(r"<!--\s*bm25:\s*(.*?)\s*-->", md_content, re.IGNORECASE | re.DOTALL)
+    return match.group(1).strip() if match else None
+
+
+def remove_bm25_comments(md_content: str) -> str:
+    """Удаляет <!-- bm25: ... --> из текста, чтобы не попал в чанки."""
+    return re.sub(r"<!--\s*bm25:.*?-->", "", md_content, flags=re.IGNORECASE | re.DOTALL)
+
+
+# ── Ранжирование / BM25-запросы ────────────────────────────────
+
+def normalize_score(score: float, ranked_by: str) -> float:
+    """
+    Нормализует score от Milvus или reranker в диапазон [0, 1].
+    """
+    try:
+        if ranked_by == "reranker":
+            return max(0.0, min(1.0, score))
+        elif ranked_by == "milvus":
+            if 0 <= score <= 1:
+                return 1.0 - score
+            return min(score / 10.0, 1.0)
+    except Exception:
+        return 0.0
+
+
+def remove_stopwords_russian(text: str) -> str:
+    """Удаляет стоп-слова из текста для BM25-поиска."""
+    if not text:
+        return ""
+    words = re.findall(r"\b\w+\b", text.lower())
+    filtered = [w for w in words if w not in config.rag_config.RUSSIAN_STOPWORDS]
+    return " ".join(filtered)

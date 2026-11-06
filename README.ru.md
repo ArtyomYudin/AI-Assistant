@@ -376,41 +376,78 @@ curl -X POST "http://localhost:8008/merge-session?old_session_id=anon_abc" \
 ```
 .
 ├── api/
-│   └── app.py                    # FastAPI: /ask/sse, /index, /health
+│   └── app.py                        # FastAPI: /ask/sse, /index, /health
 ├── config/
-│   └── rag_config.py             # Все параметры через env
+│   └── rag_config.py                 # Все параметры через env
 ├── core/
-│   ├── rag_core.py               # RAGCore — оркестратор
-│   ├── collection_manager.py     # Multi-collection routing + expansion + fallback
-│   ├── milvus_manager.py         # Hybrid search + reranker
-│   ├── splitters.py              # Markdown splitter с bm25-обогащением
-│   ├── chat_history.py           # RedisChatHistory
-│   ├── embedding_cache.py        # RedisEmbeddingCache
-│   ├── local_embeddings.py       # FRIDA через httpx
-│   ├── polite_detector.py        # Regex-детектор «спасибо/привет»
-│   ├── rate_limiter.py           # Двухуровневый LLM-лимитер
-│   ├── eval.py                   # Streaming keyword coverage eval
-│   ├── context.py                # ContextVar для session_id
-│   ├── document_loader.py        # MD/TXT loader
-│   ├── document_converter.py     # PDF → Markdown (Docling)
-│   ├── tools/
-│   │   ├── registry.py           # ALL_TOOLS / TOOL_REGISTRY
-│   │   ├── runner.py             # Streaming tool-loop
-│   │   ├── parser.py             # Robust JSON tool-call parser
-│   │   ├── weather_tool.py       # get_weather (wttr.in)
-│   │   └── kb_tool.py            # search_knowledge_base
-│   └── utils.py                  # count_tokens, hash_text, JWT
+│   ├── rag_core.py                   # RAGCore — тонкий фасад над компонентами
+│   │
+│   ├── orchestration/                # Слой решений: роутинг, промпты, ответы
+│   │   ├── answer_generator.py       # Стриминг: ветки tool-flow + RAG-flow
+│   │   ├── collection_manager.py     # Multi-collection routing + expansion + fallback
+│   │   ├── prompt_builder.py         # Сборка контекста + token-aware обрезка истории
+│   │   └── prompt_diagnostics.py     # Раскладка промпта по токенам + debug-дампы
+│   │
+│   ├── models/                       # Всё, что ходит в LLM / embeddings
+│   │   ├── model_provider.py         # Ленивые LLM / embeddings / tool_check_llm + close
+│   │   ├── local_embeddings.py       # FRIDA через httpx
+│   │   └── rate_limiter.py           # Двухуровневый LLM-лимитер
+│   │
+│   ├── storage/                      # Персистентность: Milvus + Redis
+│   │   ├── milvus_manager.py         # Hybrid search + reranker
+│   │   ├── chat_history.py           # RedisChatHistory
+│   │   └── embedding_cache.py        # RedisEmbeddingCache
+│   │
+│   ├── ingestion/                    # Документы → чанки → векторы
+│   │   ├── document_loader.py                 # MD/TXT loader
+│   │   ├── document_converter.py              # PDF → Markdown (Docling)
+│   │   ├── splitter.py               # Markdown splitter с bm25-обогащением
+│   │   └── document_indexer.py                # load + split + embed + insert в Milvus
+│   │
+│   ├── tools/                        # Tool-calling
+│   │   ├── registry.py               # ALL_TOOLS / TOOL_REGISTRY
+│   │   ├── executor.py               # Выполнение инструментов + валидация tool-flow
+│   │   ├── runner.py                 # Streaming tool-loop
+│   │   ├── parser.py                 # Robust JSON tool-call parser
+│   │   ├── weather_tool.py           # get_weather (wttr.in)
+│   │   └── kb_tool.py                # search_knowledge_base
+│   │
+│   └── common/                       # Сквозные утилиты
+│       ├── settings.py               # get_config() — кэшированный синглтон RAGConfig
+│       ├── text.py                   # count_tokens, hash_text, BM25/markdown
+│       ├── auth.py                   # JWT / get_current_user
+│       ├── context.py                # ContextVar для session_id
+│       ├── polite_detector.py        # Regex-детектор «спасибо/привет»
+│       └── eval.py                   # Streaming keyword coverage eval
+│
 ├── ui/
-│   └── app.py                    # Gradio UI
+│   └── app.py                        # Gradio UI
 ├── docker/
-│   ├── Dockerfile                # RAG API
-│   ├── Dockerfile.rag-gradio     # UI
-│   ├── Dockerfile.frida-embed    # FRIDA сервер
-│   └── Dockerfile.reranker       # bge-reranker сервер
-├── scraped_data/                 # Документы по коллекциям
+│   ├── Dockerfile                    # RAG API
+│   ├── Dockerfile.rag-gradio         # UI
+│   ├── Dockerfile.frida-embed        # FRIDA сервер
+│   └── Dockerfile.reranker           # bge-reranker сервер
+├── scraped_data/                     # Документы по коллекциям
 ├── docker-compose-frida.yaml
 └── .env.example
 ```
+
+### Зависимости между слоями
+
+Строго одно направление — фасад сверху, все остальные ниже:
+
+```
+rag_core.py  →  orchestration  →  { models, storage, ingestion, tools, common }
+                                          ↓
+                                       common
+```
+
+- `orchestration/` принимает решения (какой промпт, какой источник, какой инструмент). Меняется чаще всего.
+- `models/` — единственный слой, который открывает httpx-соединения к vLLM / FRIDA.
+- `storage/` — единственный слой, который общается с Milvus и Redis.
+- `ingestion/` — офлайн-пайплайн через `/index`, независимый жизненный цикл от онлайн-пути.
+- `tools/` — самодостаточная plugin-поверхность: добавление инструмента трогает только эту папку.
+- `common/` — stateless-хелперы, доменной логики здесь нет.
 
 ---
 
@@ -449,7 +486,7 @@ DROP_ALL_COLLECTIONS=true docker compose -f docker-compose-frida.yaml up -d --fo
 1. **Reranker через `sentence-transformers`, не через vLLM** — vLLM на ROCm возвращает одинаковые скоры (`0.00065`) для всех пар из-за бага в pooling-слое. Обход: отдельный сервис на `sentence-transformers` + GPU1.
 2. **Путь токенизатора** — `/models/pimenovdv/T-lite-it-2.1-AWQ-4bits` должен содержать HF-токенизатор, иначе используется `tiktoken` с калибровкой ×0.75 под русский. Задайте `LLM_MODEL_PATH` в docker-compose для точного подсчёта.
 3. **BM25-запрос передаётся без `remove_stopwords_russian`** — индексация со стоп-словами, запрос без — recall деградирует. Рекомендуется передавать `query_text` as-is (текущее поведение).
-4. **PDF-документы** — `PyPDF2` даёт плоский текст без таблиц. Для качественной индексации используйте Docling (`core/document_converter.py`) и кэшируйте `.md` рядом с `.pdf`.
+4. **PDF-документы** — `PyPDF2` даёт плоский текст без таблиц. Для качественной индексации используйте Docling (`core/ingestion/document_converter.py`) и кэшируйте `.md` рядом с `.pdf`.
 5. **`*_BASE_URL` не читаются из env** — значения захардкожены в `config/rag_config.py`. Пропишите IP вашего хоста там или переопределите в подклассе.
 6. **Tool registry минимален** — активен только `get_weather`. `search_knowledge_base` закомментирован в `core/tools/registry.py` на время консолидации KB-инструментов.
 

@@ -1,4 +1,4 @@
-# core/milvus_manager.ry
+# core/storage/milvus_manager.ry
 
 # Copyright 2025 Artyom Yudin
 #
@@ -22,7 +22,7 @@ from pymilvus import AnnSearchRequest, DataType, Function, FunctionType, MilvusE
 from pymilvus.client.types import LoadState
 
 from config.rag_config import RAGConfig
-from core.utils import hash_text, remove_stopwords_russian
+from core.common.text import hash_text, remove_stopwords_russian
 
 logger = logging.getLogger(__name__)
 

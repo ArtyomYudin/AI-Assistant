@@ -39,13 +39,16 @@ GRADIO_PASSWORD = cfg.GRADIO_PASSWORD
 # ─── Инициализация ─────────────────────────────────────────────
 async def init_rag():
     global core
-    if core is None:
-        core = RAGCore(cfg)                        # CollectionManager внутри
-        await core.collection_manager.build_router()
-        core.create_retriever(k=cfg.K, fetch_k=cfg.FETCH_K)
-        core.create_qa_generator()
-        logger.info("RAGCore создан (loop=%s)", id(asyncio.get_running_loop()))
-    return core
+    if core is not None:
+        return core
+
+    new_core = RAGCore(cfg)
+    await new_core.collection_manager.build_router()
+    new_core.create_retriever(k=cfg.K, fetch_k=cfg.FETCH_K)
+    new_core.create_qa_generator()
+    core = new_core
+    logger.info("RAGCore создан (loop=%s)", id(asyncio.get_running_loop()))
+    return new_core
 
 
 async def init_rag_and_warmup():
@@ -84,7 +87,7 @@ async def chat_answer_stream(message: str, history: list, session_id: str):
 
 # ─── Тестовый вопрос с метриками (только при DEBUG=true) ──────
 async def test_answer_stream(message: str, keywords_csv: str, session_id: str):
-    from core.eval import stream_answer_and_evaluate   # ленивый импорт
+    from core.common.eval import stream_answer_and_evaluate   # ленивый импорт
 
     if not session_id:
         session_id = new_session_id()
@@ -107,7 +110,7 @@ async def test_answer_stream(message: str, keywords_csv: str, session_id: str):
                     f"Детали: {m['found_map']}"
                 )
                 yield full + pretty
-            except Exception:
+            except (json.JSONDecodeError, KeyError, TypeError):
                 yield full + "\n\n[Не удалось распарсить метрики]"
         else:
             full += part

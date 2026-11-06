@@ -1,4 +1,4 @@
-# core/polite_detector.py
+# core/common/polite_detector.py
 
 # Copyright 2025 Artyom Yudin
 #

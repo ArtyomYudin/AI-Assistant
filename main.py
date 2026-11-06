@@ -16,7 +16,7 @@
 import asyncio, logging
 from config.rag_config import RAGConfig
 from core.rag_core import RAGCore
-from core.collection_manager import CollectionManager
+from core.orchestration.collection_manager import CollectionManager
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s: %(message)s")

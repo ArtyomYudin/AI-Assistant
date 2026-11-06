@@ -1,7 +1,7 @@
 # core/tools/kb_tool.py
 import logging
 
-from core.context import current_session_id
+from core.common.context import current_session_id
 
 logger = logging.getLogger(__name__)
 

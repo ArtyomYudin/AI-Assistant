@@ -1,4 +1,4 @@
-# core/rate_limiter.py
+# core/models/rate_limiter.py
 
 # Copyright 2025 Artyom Yudin
 #

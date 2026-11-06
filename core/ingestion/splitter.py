@@ -1,4 +1,4 @@
-# core/splitters.py
+# core/ingestion/splitter.py
 
 # Copyright 2025 Artyom Yudin
 #
@@ -14,17 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
-from typing import List, Tuple
-from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
-from core.utils import clean_md_content, hash_text, remove_bm25_comments, extract_global_bm25_text
+# import logging
+# from typing import List, Tuple
+# from langchain_core.documents import Document
+# from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
+# from core.common.text import clean_md_content, hash_text, remove_bm25_comments, extract_global_bm25_text
 import logging
 from typing import List, Tuple, Optional
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
 
-from core.utils import clean_md_content, hash_text, remove_bm25_comments, extract_global_bm25_text
+from core.common.text import clean_md_content, hash_text, remove_bm25_comments, extract_global_bm25_text
 
 logger = logging.getLogger(__name__)
 

@@ -376,41 +376,78 @@ The server is at 172.30.4.135.
 ```
 .
 ├── api/
-│   └── app.py                    # FastAPI: /ask/sse, /index, /health
+│   └── app.py                        # FastAPI: /ask/sse, /index, /health
 ├── config/
-│   └── rag_config.py             # All parameters via env
+│   └── rag_config.py                 # All parameters via env
 ├── core/
-│   ├── rag_core.py               # RAGCore — orchestrator
-│   ├── collection_manager.py     # Multi-collection routing + expansion + fallback
-│   ├── milvus_manager.py         # Hybrid search + reranker
-│   ├── splitters.py              # Markdown splitter with bm25 enrichment
-│   ├── chat_history.py           # RedisChatHistory
-│   ├── embedding_cache.py        # RedisEmbeddingCache
-│   ├── local_embeddings.py       # FRIDA via httpx
-│   ├── polite_detector.py        # Regex "thanks / hi" detector
-│   ├── rate_limiter.py           # Two-tier LLM limiter
-│   ├── eval.py                   # Streaming keyword coverage eval
-│   ├── context.py                # ContextVar for session_id
-│   ├── document_loader.py        # MD/TXT loader
-│   ├── document_converter.py     # PDF → Markdown (Docling)
-│   ├── tools/
-│   │   ├── registry.py           # ALL_TOOLS / TOOL_REGISTRY
-│   │   ├── runner.py             # Streaming tool-loop
-│   │   ├── parser.py             # Robust JSON tool-call parser
-│   │   ├── weather_tool.py       # get_weather (wttr.in)
-│   │   └── kb_tool.py            # search_knowledge_base
-│   └── utils.py                  # count_tokens, hash_text, JWT
+│   ├── rag_core.py                   # RAGCore — thin facade over components
+│   │
+│   ├── orchestration/                # Decision layer: routing, prompts, answers
+│   │   ├── answer_generator.py       # Streaming: tool-flow + RAG-flow branches
+│   │   ├── collection_manager.py     # Multi-collection routing + expansion + fallback
+│   │   ├── prompt_builder.py         # Context assembly + token-aware history truncation
+│   │   └── prompt_diagnostics.py     # Prompt token distribution + debug dumps
+│   │
+│   ├── models/                       # Everything that talks to LLM / embeddings
+│   │   ├── model_provider.py         # Lazy LLM / embeddings / tool_check_llm + close
+│   │   ├── local_embeddings.py       # FRIDA via httpx
+│   │   └── rate_limiter.py           # Two-tier LLM limiter
+│   │
+│   ├── storage/                      # Persistence: Milvus + Redis
+│   │   ├── milvus_manager.py         # Hybrid search + reranker
+│   │   ├── chat_history.py           # RedisChatHistory
+│   │   └── embedding_cache.py        # RedisEmbeddingCache
+│   │
+│   ├── ingestion/                    # Documents → chunks → vectors
+│   │   ├── document_loader.py                 # MD/TXT loader
+│   │   ├── document_converter.py              # PDF → Markdown (Docling)
+│   │   ├── splitter.py               # Markdown splitter with bm25 enrichment
+│   │   └── document_indexer.py                # load + split + embed + insert into Milvus
+│   │
+│   ├── tools/                        # Tool-calling
+│   │   ├── registry.py               # ALL_TOOLS / TOOL_REGISTRY
+│   │   ├── executor.py               # Tool execution + tool-flow validation
+│   │   ├── runner.py                 # Streaming tool-loop
+│   │   ├── parser.py                 # Robust JSON tool-call parser
+│   │   ├── weather_tool.py           # get_weather (wttr.in)
+│   │   └── kb_tool.py                # search_knowledge_base
+│   │
+│   └── common/                       # Cross-cutting utilities
+│       ├── settings.py               # get_config() — cached RAGConfig singleton
+│       ├── text.py                   # count_tokens, hash_text, BM25/markdown utils
+│       ├── auth.py                   # JWT / get_current_user
+│       ├── context.py                # ContextVar for session_id
+│       ├── polite_detector.py        # Regex "thanks / hi" detector
+│       └── eval.py                   # Streaming keyword coverage eval
+│
 ├── ui/
-│   └── app.py                    # Gradio UI
+│   └── app.py                        # Gradio UI
 ├── docker/
-│   ├── Dockerfile                # RAG API
-│   ├── Dockerfile.rag-gradio     # UI
-│   ├── Dockerfile.frida-embed    # FRIDA server
-│   └── Dockerfile.reranker       # bge-reranker server
-├── scraped_data/                 # Documents per collection
+│   ├── Dockerfile                    # RAG API
+│   ├── Dockerfile.rag-gradio         # UI
+│   ├── Dockerfile.frida-embed        # FRIDA server
+│   └── Dockerfile.reranker           # bge-reranker server
+├── scraped_data/                     # Documents per collection
 ├── docker-compose-frida.yaml
 └── .env.example
 ```
+
+### Layer dependencies
+
+Strictly one direction — the facade on top, everything else below:
+
+```
+rag_core.py  →  orchestration  →  { models, storage, ingestion, tools, common }
+                                          ↓
+                                       common
+```
+
+- `orchestration/` makes decisions (which prompt, which source, which tool). Changes most often.
+- `models/` is the only layer that opens httpx connections to vLLM / FRIDA.
+- `storage/` is the only layer that talks to Milvus and Redis.
+- `ingestion/` runs offline via `/index` — independent lifecycle from the online path.
+- `tools/` is a self-contained plugin surface — adding a tool touches only this folder.
+- `common/` is stateless helpers; no domain logic lives here.
 
 ---
 
@@ -449,7 +486,7 @@ DROP_ALL_COLLECTIONS=true docker compose -f docker-compose-frida.yaml up -d --fo
 1. **Reranker runs via `sentence-transformers`, not vLLM** — vLLM on ROCm returns identical scores (`0.00065`) for every pair due to a bug in the pooling layer. Workaround: separate service on `sentence-transformers` + GPU1.
 2. **Tokenizer path** — `/models/pimenovdv/T-lite-it-2.1-AWQ-4bits` must contain a HF tokenizer; otherwise `tiktoken` with ×0.75 calibration for Russian is used. Set `LLM_MODEL_PATH` in docker-compose for accurate counting.
 3. **BM25 query is passed without stopword removal** — indexing is done with stopwords, query without → recall degrades. Recommend passing `query_text` as-is (current behaviour).
-4. **PDF documents** — `PyPDF2` produces flat text without tables. For quality indexing use Docling (`core/document_converter.py`) and cache `.md` files next to `.pdf`.
+4. **PDF documents** — `PyPDF2` produces flat text without tables. For quality indexing use Docling (`core/ingestion/document_converter.py`) and cache `.md` files next to `.pdf`.
 5. **`*_BASE_URL` values are not read from env** — they are hardcoded in `config/rag_config.py`. Set your host IP there, or override in a subclass.
 6. **Tool registry is currently minimal** — only `get_weather` is active. `search_knowledge_base` is commented out in `core/tools/registry.py` while KB tools are consolidated.
 

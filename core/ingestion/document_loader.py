@@ -1,4 +1,4 @@
-# core/document_loader.py
+# core/infestion/document_loader.py
 
 # Copyright 2025 Artyom Yudin
 #

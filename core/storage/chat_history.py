@@ -1,4 +1,4 @@
-# core/chat_history.py
+# core/storage/chat_history.py
 
 # Copyright 2025 Artyom Yudin
 #

@@ -1,4 +1,4 @@
-# core/embedding_cache.py
+# core/storage/embedding_cache.py
 
 # Copyright 2025 Artyom Yudin
 #

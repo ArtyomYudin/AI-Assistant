@@ -1,4 +1,4 @@
-# core/document_converter.py
+# core/ngestion/document_converter.py
 
 # Copyright 2025 Artyom Yudin
 #
