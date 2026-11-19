@@ -385,6 +385,7 @@ The server is at 172.30.4.135.
 │   ├── orchestration/                # Decision layer: routing, prompts, answers
 │   │   ├── answer_generator.py       # Streaming: tool-flow + RAG-flow branches
 │   │   ├── collection_manager.py     # Multi-collection routing + expansion + fallback
+│   │   ├── tools_runner.py                 # Streaming tool-loop
 │   │   ├── prompt_builder.py         # Context assembly + token-aware history truncation
 │   │   └── prompt_diagnostics.py     # Prompt token distribution + debug dumps
 │   │
@@ -407,8 +408,6 @@ The server is at 172.30.4.135.
 │   ├── tools/                        # Tool-calling
 │   │   ├── registry.py               # ALL_TOOLS / TOOL_REGISTRY
 │   │   ├── executor.py               # Tool execution + tool-flow validation
-│   │   ├── runner.py                 # Streaming tool-loop
-│   │   ├── parser.py                 # Robust JSON tool-call parser
 │   │   ├── weather_tool.py           # get_weather (wttr.in)
 │   │   └── kb_tool.py                # search_knowledge_base
 │   │
@@ -418,6 +417,7 @@ The server is at 172.30.4.135.
 │       ├── auth.py                   # JWT / get_current_user
 │       ├── context.py                # ContextVar for session_id
 │       ├── polite_detector.py        # Regex "thanks / hi" detector
+│       ├── tools_parser.py           # Robust JSON tool-call parser
 │       └── eval.py                   # Streaming keyword coverage eval
 │
 ├── ui/

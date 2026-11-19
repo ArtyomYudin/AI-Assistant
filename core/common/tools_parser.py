@@ -1,4 +1,4 @@
-# core/tools/parser.py
+# core/common/tools_parser.py
 
 # Copyright 2025 Artyom Yudin
 #

@@ -1,4 +1,4 @@
-# core/tools/runner.py
+# core/orchestration/tools_runner.py
 
 # Copyright 2025 Artyom Yudin
 #
@@ -20,7 +20,7 @@ import logging
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from core.tools.parser import parse_tool_calls_fallback
+from core.common.tools_parser import parse_tool_calls_fallback
 from core.tools.registry import TOOL_REGISTRY
 
 logger = logging.getLogger(__name__)

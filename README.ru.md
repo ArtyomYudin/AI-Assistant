@@ -386,6 +386,7 @@ curl -X POST "http://localhost:8008/merge-session?old_session_id=anon_abc" \
 │   │   ├── answer_generator.py       # Стриминг: ветки tool-flow + RAG-flow
 │   │   ├── collection_manager.py     # Multi-collection routing + expansion + fallback
 │   │   ├── prompt_builder.py         # Сборка контекста + token-aware обрезка истории
+│   │   ├── runner.py                 # Streaming tool-loop
 │   │   └── prompt_diagnostics.py     # Раскладка промпта по токенам + debug-дампы
 │   │
 │   ├── models/                       # Всё, что ходит в LLM / embeddings
@@ -407,8 +408,6 @@ curl -X POST "http://localhost:8008/merge-session?old_session_id=anon_abc" \
 │   ├── tools/                        # Tool-calling
 │   │   ├── registry.py               # ALL_TOOLS / TOOL_REGISTRY
 │   │   ├── executor.py               # Выполнение инструментов + валидация tool-flow
-│   │   ├── runner.py                 # Streaming tool-loop
-│   │   ├── parser.py                 # Robust JSON tool-call parser
 │   │   ├── weather_tool.py           # get_weather (wttr.in)
 │   │   └── kb_tool.py                # search_knowledge_base
 │   │
@@ -418,6 +417,7 @@ curl -X POST "http://localhost:8008/merge-session?old_session_id=anon_abc" \
 │       ├── auth.py                   # JWT / get_current_user
 │       ├── context.py                # ContextVar для session_id
 │       ├── polite_detector.py        # Regex-детектор «спасибо/привет»
+│       ├── tools_parser.py           # Robust JSON tool-call parser
 │       └── eval.py                   # Streaming keyword coverage eval
 │
 ├── ui/

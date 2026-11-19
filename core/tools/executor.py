@@ -15,12 +15,14 @@
 # limitations under the License.
 
 import asyncio
+import json
 import logging
 from typing import List
 
 from langchain_core.messages import BaseMessage
 
 from core.tools.registry import TOOL_REGISTRY
+from core.common.settings import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,8 @@ class ToolExecutor:
         name = tool_call["name"]
         args = tool_call.get("args") or {}
         tool_id = tool_call.get("id", "?")
+
+        cfg = get_config()
 
         func = TOOL_REGISTRY.get(name)
         if func is None:
@@ -47,14 +51,23 @@ class ToolExecutor:
                 coro = func.ainvoke(args)
             else:
                 coro = asyncio.to_thread(func, **args)
-            result = await asyncio.wait_for(coro, timeout=5.0)
 
-            if not isinstance(result, dict):
+            result = await asyncio.wait_for(coro, timeout=cfg.TOOL_TIMEOUT)
+
+            # Унификация: JSON-строку разворачиваем в dict
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                except json.JSONDecodeError:
+                    result = {"result": result}
+            elif not isinstance(result, dict):
                 result = {"result": result}
+
+            logger.info("✅ tool_result %s: %s", name, str(result)[:300])
             return result
 
         except asyncio.TimeoutError:
-            logger.warning("⏱️ tool %s превысил 5 сек — прерываю", name)
+            logger.warning("⏱️ tool %s(%s) превысил %s сек — прерываю", name, args, cfg.TOOL_TIMEOUT)
             return {"error": f"Инструмент {name} не ответил вовремя"}
         except TypeError as e:
             logger.warning("Неверные аргументы для %s(%s): %s", name, args, e)
@@ -62,6 +75,7 @@ class ToolExecutor:
         except Exception as e:
             logger.exception("Ошибка выполнения %s: %s", name, e)
             return {"error": f"Ошибка выполнения {name}: {e}"}
+
 
     @staticmethod
     def validate_tool_calls(messages: List[BaseMessage], user_id: str = "?") -> None:
