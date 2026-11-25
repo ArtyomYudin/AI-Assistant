@@ -42,13 +42,13 @@ class RedisChatHistory(BaseChatMessageHistory):
 
     def __init__(
         self,
-        session_id: str,
-        host: str = "localhost",
-        port: int = 6379,
-        db: int = 0,
-        ttl_days: int = 7,
-        max_messages: int = 50
-    ):
+            session_id: str,
+            host: str = "localhost",
+            port: int = 6379,
+            db: int = 0,
+            ttl_days: int = 7,
+            max_messages: int = 50
+    ) -> None:
         self.session_id = session_id
         self.redis_client = redis.StrictRedis(
             host = host,
@@ -132,8 +132,16 @@ class RedisChatHistory(BaseChatMessageHistory):
             logger.warning("Ошибка при чтении истории из Redis: %s", e)
             return []
 
+
     def clear(self):
         self.redis_client.delete(self.key)
+
+    def close(self) -> None:
+        """Закрывает connection pool клиента. Вызывать из RAGCore.close()."""
+        try:
+            self.redis_client.close()
+        except Exception as e:
+            logger.debug("RedisChatHistory.close() failed: %s", e)
 
     @classmethod
     def merge(cls, src_session: str, dst_session: str, **kwargs) -> int:
