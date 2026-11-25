@@ -45,6 +45,8 @@ class RAGCore:
             max_messages=self.config.MAX_HISTORY_MESSAGES,
         )
 
+        self._history_cache: dict[str, RedisChatHistory] = {"default": self.history}
+
         self.milvus = MilvusManager(
             uri=self.config.MILVUS_URI,
             collection_name=self.config.COLLECTION_NAME,
@@ -111,13 +113,22 @@ class RAGCore:
     # ── История / embeddings ────────────────────────────────────
 
     def get_history(self, session_id: str) -> RedisChatHistory:
-        return RedisChatHistory(
-            session_id=session_id,
-            host=self.config.REDIS_HOST,
-            port=self.config.REDIS_PORT,
-            ttl_days=self.config.HISTORY_TTL_DAYS,
-            max_messages=self.config.MAX_HISTORY_MESSAGES,
-        )
+        """
+        Возвращает кэшированный клиент истории для session_id.
+        Иначе каждый запрос создавал бы новый StrictRedis и пересоздавал пул
+        (redis-py шарит пулы по (host, port, db), но объект-обёртка — нет).
+        """
+        h = self._history_cache.get(session_id)
+        if h is None:
+            h = RedisChatHistory(
+                session_id=session_id,
+                host=self.config.REDIS_HOST,
+                port=self.config.REDIS_PORT,
+                ttl_days=self.config.HISTORY_TTL_DAYS,
+                max_messages=self.config.MAX_HISTORY_MESSAGES,
+            )
+            self._history_cache[session_id] = h
+        return h
 
     async def _get_embedding_cached(self, query: str) -> Optional[List[float]]:
         cached = self.embedding_cache.get(query)
@@ -235,7 +246,10 @@ class RAGCore:
             self.embedding_cache.client.close()
         with contextlib.suppress(Exception):
             await self.collection_manager.redis.close()
-        with contextlib.suppress(Exception):
-            self.history.redis_client.close()
+
+        for h in self._history_cache.values():
+            with contextlib.suppress(Exception):
+                h.close()
+        self._history_cache.clear()
 
         logger.info("RAGCore: все ресурсы закрыты")
