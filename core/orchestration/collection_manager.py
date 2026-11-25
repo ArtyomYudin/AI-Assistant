@@ -459,7 +459,7 @@ class CollectionManager:
         if not collections:
             return []
 
-        # 1. Проверяем существование и загружаем коллекции
+        # Проверяем существование и загружаем коллекции
         existing: List[str] = []
         for cname in collections:
             try:
@@ -474,7 +474,7 @@ class CollectionManager:
         if not existing:
             return []
 
-        # 2. Параллельный поиск БЕЗ глобальной фильтрации
+        # Параллельный поиск БЕЗ глобальной фильтрации
         tasks = [
             self.milvus.hybrid_search(
                 query_text=query,
@@ -490,7 +490,7 @@ class CollectionManager:
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # 3. Per-collection relative threshold
+        # Per-collection relative threshold
         merged: List[Document] = []
         stats: List[str] = []
         for cname, docs in zip(existing, results):
@@ -524,35 +524,80 @@ class CollectionManager:
             # score — но документы, скорее всего, есть. Снижаем порог и
             # пропускаем всё, что вернул hybrid_search (top_k на коллекцию).
             if self._has_broad_intent(query):
-                logger.info(
-                    "Broad intent + пустой первичный поиск → мягкий порог "
-                    "(принимаю всё, что вернул reranker, без min_absolute)"
+                # Проверяем, есть ли реальный сигнал (local_max > 0) хотя бы
+                # в одной коллекции. Если все reranker-скоры = 0 — это «нет
+                # совпадений», а не «недооценка»: broad intent не оправдывает
+                # подстановку случайного шума (пример: запрос про почту с
+                # broad-словом «покажи все» триггерил RAG про камеры с max=0).
+
+                # Reranker возвращает крошечные положительные значения (1e-4…1e-5)
+                # для нерелевантных запросов, а не точный 0.0. Порог «> 0» их пропускает.
+                # Используем COLLECTION_MIN_ABSOLUTE как явный noise floor:
+                # ниже него reranker говорит «нет совпадений», а не «слабое совпадение».
+                signal_threshold = self.config.COLLECTION_MIN_ABSOLUTE  # 0.03
+
+                has_any_signal = any(
+                    not isinstance(docs, Exception) and docs
+                    and max(
+                        (d.metadata.get("score", 0.0) for d in docs),
+                        default=0.0,
+                    ) >= signal_threshold
+                    for docs in results
                 )
-                # Повторяем сборку с min_absolute=0.0
-                for cname, docs in zip(existing, results):
-                    if isinstance(docs, Exception) or not docs:
-                        continue
-                    local_max = max(d.metadata.get("score", 0.0) for d in docs)
-                    local_threshold = local_max * threshold_ratio  # без min_absolute
-                    for doc in docs:
-                        if doc.metadata.get("score", 0.0) >= local_threshold:
-                            doc.metadata["collection"] = cname
-                            merged.append(doc)
-                    logger.info(
-                        "Broad intent soft-threshold: %s kept %d/%d (thr=%.4f)",
-                        cname,
-                        len([d for d in merged if d.metadata.get("collection") == cname]),
-                        len(docs),
-                        local_threshold,
+
+                if not has_any_signal:
+                    # Для диагностики: показываем РЕАЛЬНЫЙ максимум score с точностью
+                    # до 1e-6. Иначе «= 0» в логе не отличить от «reranker вернул шум 1e-4,
+                    # который отфильтрован noise floor» — а это разные диагнозы.
+                    best_score = max(
+                        (
+                            max((d.metadata.get("score", 0.0) for d in docs), default=0.0)
+                            for docs in results
+                            if not isinstance(docs, Exception) and docs
+                        ),
+                        default=0.0,
                     )
+                    logger.info(
+                        "Broad intent, но все reranker-скоры ниже noise floor %.4f "
+                        "(best=%.6f) — RAG-контекст не подставляю",
+                        signal_threshold, best_score,
+                    )
+                else:
+                    logger.info(
+                        "Broad intent + есть сигнал (local_max > 0) → мягкий порог"
+                    )
+                    for cname, docs in zip(existing, results):
+                        if isinstance(docs, Exception) or not docs:
+                            continue
+                        local_max = max(d.metadata.get("score", 0.0) for d in docs)
+                        if local_max < signal_threshold:  # ★ тот же порог
+                            logger.debug(
+                                "Broad intent soft-threshold: %s has local_max=%.6f < %.4f, skipping",
+                                cname, local_max, signal_threshold,
+                            )
+                            continue
+                        local_threshold = local_max * threshold_ratio
+                        for doc in docs:
+                            if doc.metadata.get("score", 0.0) >= local_threshold:
+                                doc.metadata["collection"] = cname
+                                merged.append(doc)
+                        logger.info(
+                            "Broad intent soft-threshold: %s kept %d/%d "
+                            "(thr=%.4f, max=%.4f)",
+                            cname,
+                            len([d for d in merged if d.metadata.get("collection") == cname]),
+                            len(docs),
+                            local_threshold,
+                            local_max,
+                        )
 
             if not merged:
                 return []
 
-        # 4. Сортировка по score (важно: cap должен применяться к отсортированному)
+        # Сортировка по score (важно: cap должен применяться к отсортированному)
         merged.sort(key=lambda d: d.metadata.get("score", 0.0), reverse=True)
 
-        # 5. Per-source cap: не более N чанков с одного файла
+        # Per-source cap: не более N чанков с одного файла
         source_counts: dict = {}
         capped: List[Document] = []
         dropped_by_source: dict = {}
@@ -571,7 +616,7 @@ class CollectionManager:
                 ", ".join(f"{src}: -{n}" for src, n in dropped_by_source.items()),
             )
 
-        # 5.5. ── EXPANSION BY SOURCE ──────────────────────────────
+        # ── EXPANSION BY SOURCE ──────────────────────────────
         # Режим задаётся config.EXPANSION_MODE:
         #   off    — ничего не разворачиваем (старое поведение)
         #   always — по общему EXPANSION_THRESHOLD
@@ -587,7 +632,7 @@ class CollectionManager:
                 skip_max = self.config.EXPANSION_SKIP_MAX_MATCHED
                 skip_score = self.config.EXPANSION_SKIP_SCORE
 
-                # ★ Узкий+уверенный запрос: 1 чанк, score > 0.9 → это про конкретный чанк
+                # Узкий+уверенный запрос: 1 чанк, score > 0.9 → это про конкретный чанк
                 if (
                         not broad
                         and skip_max > 0
@@ -623,7 +668,7 @@ class CollectionManager:
                     max_chunks_per_source=self.config.MAX_CHUNKS_PER_SOURCE,
                 )
 
-        # 6. Дедуп по hash
+        # Дедуп по hash
         seen: set = set()
         deduped: List[Document] = []
         for d in capped:
