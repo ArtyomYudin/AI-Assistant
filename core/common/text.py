@@ -19,9 +19,10 @@ import logging
 import os
 import re
 import time as _time
-from typing import Optional
-
+import json
 import tiktoken
+from typing import Optional
+from langchain_core.messages import BaseMessage
 
 import config.rag_config
 from core.common.settings import get_config
@@ -214,3 +215,25 @@ def remove_stopwords_russian(text: str) -> str:
     words = re.findall(r"\b\w+\b", text.lower())
     filtered = [w for w in words if w not in config.rag_config.RUSSIAN_STOPWORDS]
     return " ".join(filtered)
+
+
+def count_msg_tokens(m: BaseMessage, *, include_role: bool = False) -> int:
+    """
+    Токены сообщения с учётом tool_calls и tool_call_id.
+
+    include_role=True добавляет примерный overhead на role-маркер chat-template
+    ("Human: ", "AI: ", ...). Нужно для консервативных бюджетов — там, где
+    число сравнивается с лимитом контекста, а не просто логируется.
+    """
+    prefix = f"{m.type.capitalize()}: " if include_role else ""
+    base = count_tokens(prefix + (m.content or ""))
+
+    tool_calls = getattr(m, "tool_calls", None)
+    if tool_calls:
+        base += count_tokens(json.dumps(tool_calls, ensure_ascii=False))
+
+    tool_call_id = getattr(m, "tool_call_id", None)
+    if tool_call_id:
+        base += count_tokens(str(tool_call_id))
+
+    return base
