@@ -348,6 +348,9 @@ services:
       - MAX_HISTORY_MESSAGES=12
       - MAX_HISTORY_TOKENS=4000
       - MAX_TOOL_HISTORY_TOKENS=3500
+      - MAIL_AUDIT_SSH_HOST=ingrid.center-inform.ru
+      - MAIL_AUDIT_SSH_USER=mail_auditor
+      - MAIL_AUDIT_SSH_KEY=/app/config/id_ed25519_mail_auditor
     ports:
       - "8008:8008"
     volumes:
@@ -387,6 +390,9 @@ services:
       - MAX_HISTORY_MESSAGES=12
       - MAX_HISTORY_TOKENS=4000
       - MAX_TOOL_HISTORY_TOKENS=3500
+      - MAIL_AUDIT_SSH_HOST=ingrid.center-inform.ru
+      - MAIL_AUDIT_SSH_USER=mail_auditor
+      - MAIL_AUDIT_SSH_KEY=/app/config/id_ed25519_mail_auditor
       ports:
         - "7860:7860"  # Gradio по умолчанию слушает 7860
       volumes:

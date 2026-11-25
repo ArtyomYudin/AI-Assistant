@@ -15,22 +15,25 @@
 # limitations under the License.
 
 from core.tools.weather_tool import WEATHER_TOOLS, get_weather
-from core.tools.kb_tool import KB_TOOLS, search_knowledge_base
-
+from .exchange_mailbox_tool.tool import EXCHANGE_MAILBOX_TOOL, get_exchange_mailbox_info
+from .gateway_status_tool.tool import GATEWAY_STATUS_TOOL, check_gateway_status
+from .mail_audit_tool import check_mail_logs, MAIL_AUDIT_TOOL
 
 # Все схемы, которые передаём в LLM
 ALL_TOOLS = [
-    *WEATHER_TOOLS,
-    # *KB_TOOLS,
-    # сюда добавляй другие *_TOOLS по мере роста
-    # *VLAN_TOOLS,
-    # *IP_TOOLS,
+    # *WEATHER_TOOLS,
+    *MAIL_AUDIT_TOOL,
+    *GATEWAY_STATUS_TOOL,
+    *EXCHANGE_MAILBOX_TOOL,
 ]
 
 
 # Имена → вызываемые функции
 TOOL_REGISTRY = {
     "get_weather": get_weather,
+    "check_mail_logs": check_mail_logs,
+    "check_gateway_status": check_gateway_status,
+    "get_exchange_mailbox_info": get_exchange_mailbox_info
     # "search_knowledge_base": search_knowledge_base,
     # "lookup_vlan": lookup_vlan,
 }

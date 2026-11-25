@@ -19,6 +19,8 @@ from starlette.middleware.cors import CORSMiddleware
 from config.rag_config import RAGConfig
 from core.rag_core import RAGCore
 
+from core.tools.mail_audit_tool import close_client as close_mail_client
+
 logger = logging.getLogger(__name__)
 
 cfg = RAGConfig()
@@ -43,6 +45,8 @@ async def lifespan(_app: FastAPI):
         raise
 
     yield
+
+    await close_mail_client()
 
     if core is not None:
         await core.close()

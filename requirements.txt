@@ -18,3 +18,4 @@ docling
 docling-core
 python-jose[cryptography]
 transformers>=4.40
+asyncssh

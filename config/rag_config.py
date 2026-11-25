@@ -15,10 +15,14 @@
 # limitations under the License.
 
 import os
+import logging
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 from pathlib import Path
 from typing import Set
+
+logger = logging.getLogger(__name__)
 
 # Минимальный набор стоп-слов для русского (можно расширить)
 RUSSIAN_STOPWORDS: Set[str] = {
@@ -33,7 +37,7 @@ class RAGConfig(BaseSettings):
     # Общие
     PROJECT_ROOT: Path = Path(__file__).parent.parent.resolve()
     DATA_DIR: str = "scraped_data"
-    MODE: str = os.getenv("MODE", "rag")  # rag, llm_only, hybrid
+    MODE: str = os.getenv("MODE", "hybrid")  # rag, llm_only, hybrid
 
     # LLM / Embedding
     LLM_NAME: str = os.getenv("LLM_NAME", "T-lite-it-2.1-AWQ") #"Qwen3-8B-AWQ"
@@ -122,11 +126,13 @@ class RAGConfig(BaseSettings):
 
     # Context control (12288 с slack)
     MAX_CONTEXT_TOKENS: int = int(os.getenv("MAX_CONTEXT_TOKENS", 11400)) # Максимум под документы
-    MAX_SINGLE_TURN_CONTEXT: int = 3500  # потолок контекста на ход
+    # MAX_SINGLE_TURN_CONTEXT: int = 3500  # потолок контекста на ход
     MAX_QUESTION_TOKENS: int = 2000  # потолок «голого» вопроса/лога
     RESERVED_FOR_COMPLETION: int = int(os.getenv("RESERVED_FOR_COMPLETION", 1024)) # Запас на ответ LLM
     RESERVED_FOR_OVERHEAD: int = int(os.getenv("RESERVED_FOR_OVERHEAD", 300))  # Системный промпт + история
 
+    # Tool
+    TOOL_TIMEOUT: float = float(os.environ.get("TOOL_TIMEOUT", 50))
 
     # Redis
     REDIS_HOST: str = "172.20.4.50"
@@ -223,12 +229,42 @@ class RAGConfig(BaseSettings):
         "   или вызвать системную утилиту — выбери подходящий инструмент из списка предоставленных тебе функций и верни его вызов.\n"
         "3. Если запрос пользователя — это общий вопрос по регламентам, архитектуре сети, базам данных, поиску статических инструкций "
         "   или простое общение — НЕ вызывай никакие инструменты. Отвечай обычным текстом, система автоматически перенаправит запрос в RAG.\n\n"
-
+        
+        "FOLLOW-UP:\n"
+        "- Уточняющий вопрос про объект из предыдущего tool_call («его», «этой», «того же») "
+        "  → вызывай инструмент заново с этим объектом. Не отвечай из истории.\n"
+        "- Повтор вопроса («были ли...», «сколько...» ещё раз) → вызывай инструмент заново. "
+        "  Пользователь хочет свежие данные.\n"
+        "- Единственное исключение — явно «из предыдущего ответа» / «повтори прошлый ответ».\n\n"
+        
         "КРИТИЧЕСКИЕ ПРАВИЛА:\n"
         "- Вызывай инструмент только в том случае, если переданные пользователем данные (email, IP, имя хоста) "
         "  строго соответствуют обязательным аргументам функции.\n"
+        "- Местоимения («его», «её», «это») — бери объект из последнего вопроса пользователя, "
+        "  где он назван явно.\n"
         "- Если нужного инструмента нет в списке предоставленных функций — ничего не вызывай, отвечай обычным текстом."
     )
+
+    # ── ВАЛИДАЦИЯ ────────────────────────────────────────────────
+    @model_validator(mode="after")
+    def _ensure_completion_reserve(self):
+        """
+        RESERVED_FOR_COMPLETION должен быть ≥ LLM_MAX_TOKEN, иначе длинная
+        генерация (например, «перечисли все письма») переполнит 12288-контекст
+        vLLM: prompt ≈ 11400 − reserve + completion (до 2048) → 400.
+        Авто-подъём с warning — чтобы не ломать существующие .env.
+        """
+        if self.RESERVED_FOR_COMPLETION < self.LLM_MAX_TOKEN:
+            logger.warning(
+                "RESERVED_FOR_COMPLETION=%d < LLM_MAX_TOKEN=%d — поднимаю до %d. "
+                "Это защищает от 400 при длинной генерации. "
+                "Поправьте .env или оставьте как есть.",
+                self.RESERVED_FOR_COMPLETION, self.LLM_MAX_TOKEN,
+                self.LLM_MAX_TOKEN,
+            )
+            object.__setattr__(self, "RESERVED_FOR_COMPLETION", self.LLM_MAX_TOKEN)
+        return self
+
 
     class Config:
         env_file = ".env"
