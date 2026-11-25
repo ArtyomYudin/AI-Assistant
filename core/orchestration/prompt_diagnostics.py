@@ -14,24 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import logging
 from typing import List
 
 from langchain_core.messages import BaseMessage
 
-from core.common.text import count_tokens
+from core.common.text import count_msg_tokens
 
 logger = logging.getLogger(__name__)
-
-
-def count_msg_tokens(m: BaseMessage) -> int:
-    """Токены сообщения с учётом tool_calls (для AIMessage)."""
-    base = count_tokens(m.content or "")
-    tool_calls = getattr(m, "tool_calls", None)
-    if tool_calls:
-        base += count_tokens(json.dumps(tool_calls, ensure_ascii=False))
-    return base
 
 
 def log_prompt_stats(user_id: str, messages: List[BaseMessage], branch: str) -> None:
@@ -51,7 +41,7 @@ def log_prompt_stats(user_id: str, messages: List[BaseMessage], branch: str) -> 
             break
 
     for i, m in enumerate(messages):
-        n = count_msg_tokens(m)
+        n = count_msg_tokens(m, include_role=True)
         if m.type == "system":
             system_tok += n
         elif m.type == "tool":

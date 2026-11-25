@@ -15,13 +15,13 @@
 # limitations under the License.
 
 import logging
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from langchain_core.documents import Document
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage
 
 from config.rag_config import RAGConfig
-from core.common.text import count_tokens, truncate_text_by_tokens
+from core.common.text import count_tokens, truncate_text_by_tokens, count_msg_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +76,9 @@ class PromptBuilder:
             return history
 
         def _total(msgs):
-            return sum(
-                count_tokens(f"{m.type.capitalize()}: {m.content}")
-                for m in msgs
-            )
+            # Учитываем tool_calls и tool_call_id — иначе AIMessage с
+            # tool_calls занижает бюджет и tool-check уходит с переполнением.
+            return sum(count_msg_tokens(m, include_role=True) for m in msgs)
 
         for idx in safe_points:
             candidate = history[idx:]
@@ -93,14 +92,49 @@ class PromptBuilder:
             one_turn = tail[:2]
             if _total(one_turn) <= max_tokens:
                 return one_turn
+            # fallback не должен возвращать over-budget turn.
+            # Обрезаем содержимое HumanMessage, оставляя AI как есть.
+            # Считаем «бюджет на контент» как max_tokens − роль-маркеры.
             logger.warning(
                 "История переполнена: последний ход (%d tok) > бюджет (%d tok). "
-                "Возвращаю как есть.",
+                "Обрезаю HumanMessage.",
                 _total(one_turn), max_tokens,
             )
-            return one_turn
 
-        return tail[:1]
+            human_msg = one_turn[0]
+            ai_msg = one_turn[1] if len(one_turn) > 1 else None
+
+            ai_tokens = count_msg_tokens(ai_msg, include_role=True) if ai_msg else 0
+            human_overhead = count_msg_tokens(
+                HumanMessage(content=""), include_role=True
+            )
+            human_budget = max(0, max_tokens - ai_tokens - human_overhead)
+
+            new_human = HumanMessage(
+                content=truncate_text_by_tokens(
+                    human_msg.content or "", human_budget
+                )
+            )
+            result = [new_human]
+            if ai_msg is not None:
+                result.append(ai_msg)
+            return result
+
+        # один Human — тоже обрезаем, если не влезает
+        only_human = tail[:1]
+        if _total(only_human) > max_tokens:
+            logger.warning(
+                "История: единственный Human (%d tok) > бюджета (%d tok) — обрезаю.",
+                _total(only_human), max_tokens,
+            )
+            human_overhead = count_msg_tokens(
+                HumanMessage(content=""), include_role=True
+            )
+            return [HumanMessage(content=truncate_text_by_tokens(
+                only_human[0].content or "",
+                max(0, max_tokens - human_overhead),
+            ))]
+        return only_human
 
     # ── Context ──────────────────────────────────────────────────
 
@@ -109,6 +143,7 @@ class PromptBuilder:
         docs: List[Document],
         history: List[BaseMessage],
         question: str = "",
+        available_override: Optional[int] = None,
     ) -> Tuple[str, List[BaseMessage], str]:
         """
         Формирует контекст для LLM:
@@ -116,16 +151,22 @@ class PromptBuilder:
           - источник включается ЦЕЛИКОМ или пропускается
           - источники упорядочены по top-score своих чанков
           - fallback: если ни один источник не влез — top-чанки с truncate
+        available_override — если caller уже посчитал израсходованный бюджет
+        (например, tool-flow, где в messages уже лежат system + history +
+        question + tool_calls + ToolMessage), он передаёт готовый лимит на
+        документы. В этом случае внутренний расчёт available пропускается.
         """
-        question_tokens = count_tokens(question or "")
+        question_for_budget = truncate_text_by_tokens(
+            question or "", self.config.MAX_QUESTION_TOKENS
+        )
+        question_tokens = count_tokens(question_for_budget)
 
         # 1. История
         truncated_history = self.truncate_history_safe(
             history, self.config.MAX_HISTORY_TOKENS
         )
         history_tokens = sum(
-            count_tokens(f"{m.type.capitalize()}: {m.content}")
-            for m in truncated_history
+            count_msg_tokens(m, include_role=True) for m in truncated_history
         )
 
         history_summary = ""
@@ -140,14 +181,23 @@ class PromptBuilder:
             history_tokens += count_tokens(history_summary)
 
         # 2. Бюджет на документы
-        available = (
-            self.config.MAX_CONTEXT_TOKENS
-            - self.config.RESERVED_FOR_COMPLETION
-            - history_tokens
-            - self.config.RESERVED_FOR_OVERHEAD
-            - question_tokens
-        )
-        available = max(0, available)
+        if available_override is not None:
+            available = max(0, available_override)
+            logger.info(
+                "Context: budget override=%d tok "
+                "(history_summary=%d, question=%d — уже учтены caller'ом)",
+                available, history_tokens, question_tokens,
+            )
+        else:
+            available = (
+                self.config.MAX_CONTEXT_TOKENS
+                - self.config.RESERVED_FOR_COMPLETION
+                - history_tokens
+                - self.config.RESERVED_FOR_OVERHEAD
+                - question_tokens
+            )
+            available = max(0, available)
+
         if available <= 0:
             return "", truncated_history, history_summary
 
@@ -241,7 +291,20 @@ class PromptBuilder:
           2) SystemMessage — резюме обрезанных сообщений (только при truncation)
           3) truncated_history — пары user/assistant из истории
           4) HumanMessage — «Контекст:\\n{...}\\n\\nВопрос: {question}»
+        обрезаем question до MAX_QUESTION_TOKENS здесь — это
+        последний барьер перед LLM. Вызывающий код может передать оригинал,
+        но в промпт уйдёт не больше лимита.
         """
+        question_for_llm = truncate_text_by_tokens(
+            question or "", self.config.MAX_QUESTION_TOKENS
+        )
+        if len(question_for_llm) < len(question or ""):
+            logger.warning(
+                "Question обрезан: %d → %d символов (MAX_QUESTION_TOKENS=%d)",
+                len(question or ""), len(question_for_llm),
+                self.config.MAX_QUESTION_TOKENS,
+            )
+
         system_content = self.get_system_prompt(mode)
         messages: List[BaseMessage] = [SystemMessage(content=system_content)]
 
@@ -251,9 +314,9 @@ class PromptBuilder:
         messages.extend(truncated_history)
 
         if context.strip():
-            user_content = f"Контекст:\n{context}\n\nВопрос: {question}"
+            user_content = f"Контекст:\n{context}\n\nВопрос: {question_for_llm}"
         else:
-            user_content = question
+            user_content = question_for_llm
 
         messages.append(HumanMessage(content=user_content))
         return messages
