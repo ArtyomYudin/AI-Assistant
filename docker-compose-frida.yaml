@@ -333,7 +333,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=DEBUG
-      - MODE=rag
+      - MODE=hybrid
       - LLM_MAX_TOKEN=2048
       - LLM_TEMPERATURE=0.7
       - LLM_PRESENCE_PENALTY=0.4
@@ -376,7 +376,7 @@ services:
       environment:
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=DEBUG
-      - MODE=rag
+      - MODE=hybrid
       - LLM_MAX_TOKEN=2048
       - LLM_TEMPERATURE=0.7
       - LLM_PRESENCE_PENALTY=0.4
