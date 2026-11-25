@@ -355,6 +355,7 @@ services:
       - "8008:8008"
     volumes:
       - /storage/models/pimenovdv/T-lite-it-2.1-AWQ-4bits:/models/pimenovdv/T-lite-it-2.1-AWQ-4bits:ro
+      - ./config/id_ed25519_mail_auditor:/app/config/id_ed25519_mail_auditor:ro
     command: >
       uvicorn api.app:app --host 0.0.0.0 --port 8008 --log-level debug
     depends_on:
@@ -397,6 +398,7 @@ services:
         - "7860:7860"  # Gradio по умолчанию слушает 7860
       volumes:
         - /storage/models/pimenovdv/T-lite-it-2.1-AWQ-4bits:/models/pimenovdv/T-lite-it-2.1-AWQ-4bits:ro
+        - ./config/id_ed25519_mail_auditor:/app/config/id_ed25519_mail_auditor:ro
       command: python -m ui.app  # запуск Gradio-приложения
       depends_on:
         - rag-api
